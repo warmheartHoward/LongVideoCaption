@@ -1,0 +1,67 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python: 单视频打标",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "args": [
+        "--input",    "D:/long-form-video-caption/videos/I5cFBi02O34.mp4",
+        "--output",   "D:/long-form-video-caption/outputs_v2",
+        "--workers",  "1",
+        "--api-key",  "YOUR_API_KEY_HERE",
+        "--base-url", "https://az.gptplus5.com/v1"
+      ]
+    },
+    {
+      "name": "Python: 文件夹批量打标 (3 并发)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "args": [
+        "--input",    "D:/long-form-video-caption/videos",
+        "--output",   "D:/long-form-video-caption/outputs_v2",
+        "--workers",  "3",
+        "--api-key",  "YOUR_API_KEY_HERE",
+        "--base-url", "https://az.gptplus5.com/v1"
+      ]
+    },
+    {
+      "name": "Python: 自定义超参 (video_base64 / 90s chunk)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false,
+      "args": [
+        "--input",       "D:/long-form-video-caption/videos",
+        "--output",      "D:/long-form-video-caption/outputs_v2",
+        "--workers",     "2",
+        "--api-key",     "YOUR_API_KEY_HERE",
+        "--base-url",    "https://az.gptplus5.com/v1",
+        "--chunk",       "90",
+        "--payload",     "video_base64",
+        "--target-fps",  "1.0",
+        "--frame-width", "960",
+        "--conf-thresh", "80"
+      ]
+    },
+    {
+      "name": "Python: 当前文件",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}",
+      "justMyCode": false
+    }
+  ]
+}
