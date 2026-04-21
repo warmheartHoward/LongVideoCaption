@@ -6,8 +6,8 @@ from .utils import sanitize_filename
 
 @dataclass
 class PipelineConfig:
-    api_key: str = "sk-felnhDVsFlaeCOXzha6cBhTPoMlk2qN1wZZbp8jMLFpnU5rF"
-    base_url: str = "https://az.gptplus5.com/v1"
+    api_key: str = ""
+    base_url: str = ""
     model_name: str = "gemini-3.1-pro-preview"
     llm_timeout: float = 600.0
     max_retries: int = 3
