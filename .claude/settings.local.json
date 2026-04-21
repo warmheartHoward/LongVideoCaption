@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import longvideocaption; import longvideocaption.pipeline; import longvideocaption.runner; import longvideocaption.stage1; import longvideocaption.stage2; import longvideocaption.stage3; import longvideocaption.frame_extractor; import longvideocaption.llm_client; import longvideocaption.token_tracker; import longvideocaption.utils; import longvideocaption.config; from longvideocaption.config import PipelineConfig, hyper_signature; cfg = PipelineConfig\\(\\); print\\('hyper_sig=', hyper_signature\\(cfg\\)\\); print\\('all imports OK'\\)\")",
+      "Bash(python -m py_compile longvideocaption/__init__.py longvideocaption/config.py longvideocaption/utils.py longvideocaption/token_tracker.py longvideocaption/llm_client.py longvideocaption/frame_extractor.py longvideocaption/stage1.py longvideocaption/stage2.py longvideocaption/stage3.py longvideocaption/pipeline.py longvideocaption/runner.py main.py)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}
