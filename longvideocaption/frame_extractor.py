@@ -16,8 +16,9 @@ def get_target_timestamps(
     strategy: str,
     threshold: float,
     max_frames: int,
+    log_prefix: str = "",
 ) -> List[float]:
-    print(f"\n[序列构建] 分析 {format_timestamp(chunk_start)} 到 {format_timestamp(chunk_end)}。策略: {strategy}")
+    print(f"\n{log_prefix}[序列构建] 分析 {format_timestamp(chunk_start)} 到 {format_timestamp(chunk_end)}。策略: {strategy}")
     if strategy == "scenedetect":
         from scenedetect import detect, ContentDetector
 

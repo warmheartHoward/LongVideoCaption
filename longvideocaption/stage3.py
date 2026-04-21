@@ -10,6 +10,10 @@ from .utils import parse_timestamp_to_seconds
 
 STAGE_NAME = "stage3_aggregation"
 
+
+def _log(video_tag: str, msg: str) -> None:
+    print(f"[{video_tag}] {msg}" if video_tag else msg)
+
 SYS_PROMPT = """你是一个资深的电影剧本统筹。
 你需要阅读一份带有时间戳的视频底层动作流水账，将其聚合并切分为几个符合叙事逻辑的「大章节（Chapters）」。
 
@@ -38,10 +42,11 @@ def _run_chapter_aggregation(
     aligned_results: list,
     client,
     token_tracker: TokenTracker = None,
+    video_tag: str = "",
 ) -> Tuple[dict, list]:
-    print("\n" + "=" * 50)
-    print("🎬 启动 Pass 2: 宏观章节 (Chapter) 逻辑切分...")
-    print("=" * 50)
+    _log(video_tag, "\n" + "=" * 50)
+    _log(video_tag, "🎬 启动 Pass 2: 宏观章节 (Chapter) 逻辑切分...")
+    _log(video_tag, "=" * 50)
 
     all_events = []
     timeline_text = ""
@@ -56,20 +61,21 @@ def _run_chapter_aggregation(
 
     user_prompt = f"【完整底层时间轴】:\n{timeline_text}\n\n请严格基于时间轴进行章节切分，输出 JSON。"
 
+    log_tag = f"[{video_tag}] 章节切分" if video_tag else "章节切分"
     pass2_result = request_llm_with_retry(
         client=client, model=cfg.model_name,
         messages=[{"role": "system", "content": SYS_PROMPT}, {"role": "user", "content": user_prompt}],
         max_tokens=cfg.stage3_max_tokens, temperature=cfg.stage3_temperature,
-        max_retries=cfg.max_retries, chunk_name="章节切分",
+        max_retries=cfg.max_retries, chunk_name=log_tag,
         token_tracker=token_tracker, stage=STAGE_NAME,
     )
     return pass2_result, all_events
 
 
-def _assemble_final(video_path: str, pass2_result: dict, all_events: list) -> dict:
-    print("\n" + "=" * 50)
-    print("🛠️ 启动 Pass 3: Chapter-Event 层级数据物理挂载...")
-    print("=" * 50)
+def _assemble_final(video_path: str, pass2_result: dict, all_events: list, video_tag: str = "") -> dict:
+    _log(video_tag, "\n" + "=" * 50)
+    _log(video_tag, "🛠️ 启动 Pass 3: Chapter-Event 层级数据物理挂载...")
+    _log(video_tag, "=" * 50)
 
     final_json = {
         "video_path": video_path,
@@ -79,7 +85,7 @@ def _assemble_final(video_path: str, pass2_result: dict, all_events: list) -> di
 
     chapters_def = pass2_result.get("chapters", [])
     if not chapters_def:
-        print("❌ 未获取到章节定义，将采用兜底单章节模式。")
+        _log(video_tag, "❌ 未获取到章节定义，将采用兜底单章节模式。")
         chapters_def = [{
             "chapter_id": "ch_01", "title": "完整视频", "chapter_summary": "兜底聚合",
             "start_time": all_events[0]["start_time"] if all_events else "[00:00:00.000]",
@@ -123,7 +129,7 @@ def _assemble_final(video_path: str, pass2_result: dict, all_events: list) -> di
 
     assigned_event_count = sum(len(ch["events"]) for ch in final_json["chapters"])
     if assigned_event_count < len(all_events):
-        print(f"⚠️ 警告: 有 {len(all_events) - assigned_event_count} 个事件越界未挂载，已强制追加至最终章。")
+        _log(video_tag, f"⚠️ 警告: 有 {len(all_events) - assigned_event_count} 个事件越界未挂载，已强制追加至最终章。")
         last_chapter = final_json["chapters"][-1]
         for ev in all_events:
             ev_start_sec = parse_timestamp_to_seconds(ev.get("start_time", ""))
@@ -148,24 +154,25 @@ def run_stage3(
     run_dir: str,
     client,
     token_tracker: TokenTracker = None,
+    video_tag: str = "",
 ) -> str:
     os.makedirs(run_dir, exist_ok=True)
     final_output_path = os.path.join(run_dir, "stage3_final.json")
 
     if os.path.exists(final_output_path):
-        print("\n" + "=" * 50)
-        print("⏭️  Stage 3 终产物已存在，跳过装配。")
-        print("=" * 50)
+        _log(video_tag, "\n" + "=" * 50)
+        _log(video_tag, "⏭️  Stage 3 终产物已存在，跳过装配。")
+        _log(video_tag, "=" * 50)
         return final_output_path
 
     with open(aligned_json_path, 'r', encoding='utf-8') as f:
         aligned_results = json.load(f)
 
-    pass2_result, all_events = _run_chapter_aggregation(cfg, aligned_results, client, token_tracker)
-    final_storyboard = _assemble_final(video_path, pass2_result, all_events)
+    pass2_result, all_events = _run_chapter_aggregation(cfg, aligned_results, client, token_tracker, video_tag)
+    final_storyboard = _assemble_final(video_path, pass2_result, all_events, video_tag)
 
     with open(final_output_path, 'w', encoding='utf-8') as f:
         json.dump(final_storyboard, f, ensure_ascii=False, indent=2)
 
-    print(f"\n🎉 大功告成！最终的剧本级结构化数据已保存至: {final_output_path}")
+    _log(video_tag, f"\n🎉 大功告成！最终的剧本级结构化数据已保存至: {final_output_path}")
     return final_output_path

@@ -12,6 +12,10 @@ from .utils import clean_json_response
 
 STAGE_NAME = "stage2_alignment"
 
+
+def _log(video_tag: str, msg: str) -> None:
+    print(f"[{video_tag}] {msg}" if video_tag else msg)
+
 SYS_PROMPT_ALIGNMENT = """你是一个顶级的电影多模态视觉统筹。
 当前视频正在分段处理，同一个角色可能会被赋予不同的【临时名称】。
 你的任务是：接收【已确立的全局图鉴】与【当前片段的新角色图片】，进行严谨的身份同一性判决。
@@ -96,6 +100,7 @@ def run_stage2(
     run_dir: str,
     client,
     token_tracker: TokenTracker = None,
+    video_tag: str = "",
 ) -> Tuple[str, str]:
     os.makedirs(run_dir, exist_ok=True)
     aligned_out_path = os.path.join(run_dir, "stage2_aligned.json")
@@ -104,23 +109,23 @@ def run_stage2(
     bank_progress_path = os.path.join(run_dir, "stage2_bank_progress.json")
 
     if os.path.exists(aligned_out_path) and os.path.exists(bank_out_path):
-        print("\n" + "=" * 60)
-        print("⏭️  Stage 2 终产物已存在，跳过对齐。")
-        print("=" * 60)
+        _log(video_tag, "\n" + "=" * 60)
+        _log(video_tag, "⏭️  Stage 2 终产物已存在，跳过对齐。")
+        _log(video_tag, "=" * 60)
         return aligned_out_path, bank_out_path
 
     with open(stage1_json_path, 'r', encoding='utf-8') as f:
         stage1_results = json.load(f)
 
-    print("\n" + "=" * 60)
-    print("🚀 启动 Stage 2: 多模态滚动实体消解 (带置信度拦截)")
-    print("=" * 60)
+    _log(video_tag, "\n" + "=" * 60)
+    _log(video_tag, "🚀 启动 Stage 2: 多模态滚动实体消解 (带置信度拦截)")
+    _log(video_tag, "=" * 60)
 
     aligned_results, global_bank, processed_count, accumulated_story = _load_progress(progress_path, bank_progress_path)
     if aligned_results is None:
         aligned_results = copy.deepcopy(stage1_results)
     if processed_count > 0:
-        print(f"🔄 检测到 stage2 断点：已完成 {processed_count} 个 chunk 的对齐，图鉴规模 {len(global_bank)}")
+        _log(video_tag, f"🔄 检测到 stage2 断点：已完成 {processed_count} 个 chunk 的对齐，图鉴规模 {len(global_bank)}")
 
     for i in range(processed_count, len(aligned_results)):
         chunk = aligned_results[i]
@@ -130,11 +135,11 @@ def run_stage2(
         current_story = data.get("chunk_summary", "")
         current_chars = data.get("new_characters_in_chunk", []) or []
 
-        print(f"\n🔍 分析 {chunk_range} | 发现待定面孔: {len(current_chars)} 个")
+        _log(video_tag, f"\n🔍 分析 {chunk_range} | 发现待定面孔: {len(current_chars)} 个")
 
         if not current_chars:
             accumulated_story += f"第{i+1}段: {current_story}\n"
-            print("  ⏭️ 无需对齐，跳过")
+            _log(video_tag, "  ⏭️ 无需对齐，跳过")
             processed_count = i + 1
             _save_progress(progress_path, bank_progress_path, aligned_results, global_bank, processed_count, accumulated_story)
             continue
@@ -180,10 +185,10 @@ def run_stage2(
                 )
                 if response.usage and token_tracker is not None:
                     token_tracker.record(STAGE_NAME, response.usage)
-                    print(f"  📊 [Token] Prompt: {response.usage.prompt_tokens} | Total: {response.usage.total_tokens}")
+                    _log(video_tag, f"  📊 [Token] Prompt: {response.usage.prompt_tokens} | Total: {response.usage.total_tokens}")
 
                 align_result = json.loads(clean_json_response(response.choices[0].message.content))
-                print(f"  ✅ VLM 推理成功 (耗时: {time.time() - start_time:.2f}s)")
+                _log(video_tag, f"  ✅ VLM 推理成功 (耗时: {time.time() - start_time:.2f}s)")
 
                 for mapping in align_result.get("chunk_identity_mapping", []):
                     temp_name = mapping.get("temp_name_in_chunk")
@@ -192,16 +197,16 @@ def run_stage2(
                     conf_score = mapping.get("confidence_score", 100)
 
                     if match_result != "NEW" and conf_score < cfg.stage2_confidence_threshold:
-                        print(f"    ⚠️ 置信度过低 ({conf_score})，拦截合并: {temp_name} 被强制判定为 NEW")
+                        _log(video_tag, f"    ⚠️ 置信度过低 ({conf_score})，拦截合并: {temp_name} 被强制判定为 NEW")
                         match_result = "NEW"
                         assigned_name = temp_name
 
                     if temp_name and assigned_name and match_result != "NEW":
                         mapping_dict[temp_name] = assigned_name
-                        print(f"    🔗 映射: {temp_name} -> {assigned_name} (置信度: {conf_score})")
+                        _log(video_tag, f"    🔗 映射: {temp_name} -> {assigned_name} (置信度: {conf_score})")
 
                     if match_result == "NEW":
-                        print(f"    🌟 新角色: {assigned_name} (置信度: {conf_score})")
+                        _log(video_tag, f"    🌟 新角色: {assigned_name} (置信度: {conf_score})")
                         matched_char = next((c for c in current_chars if c["temp_name"] == temp_name), None)
                         if matched_char:
                             global_bank.append({
@@ -212,9 +217,9 @@ def run_stage2(
                 break
 
             except Exception as e:
-                print(f"  ⚠️ API 请求异常 (尝试 {attempt}/{cfg.max_retries}): {e}")
+                _log(video_tag, f"  ⚠️ API 请求异常 (尝试 {attempt}/{cfg.max_retries}): {e}")
                 if attempt == cfg.max_retries:
-                    print("  ❌ 跳过该 Chunk 对齐。")
+                    _log(video_tag, "  ❌ 跳过该 Chunk 对齐。")
                 time.sleep(2)
 
         if mapping_dict:
@@ -227,7 +232,7 @@ def run_stage2(
                         new_caption = new_caption.replace(old_name, global_name)
                         replace_count += 1
                 ev["step3_synthesized_dense_caption"] = new_caption
-            print(f"  🔄 文本已更新: 修正了 {replace_count} 处身份漂移。")
+            _log(video_tag, f"  🔄 文本已更新: 修正了 {replace_count} 处身份漂移。")
 
         for c_char in current_chars:
             c_char.pop("_temp_b64", None)
@@ -236,9 +241,9 @@ def run_stage2(
         processed_count = i + 1
         _save_progress(progress_path, bank_progress_path, aligned_results, global_bank, processed_count, accumulated_story)
 
-    print("\n" + "=" * 60)
-    print("🎉 Stage 2 全局对齐完毕！图鉴收录: ", [c['global_standard_name'] for c in global_bank])
-    print("=" * 60)
+    _log(video_tag, "\n" + "=" * 60)
+    _log(video_tag, "🎉 Stage 2 全局对齐完毕！图鉴收录: " + str([c['global_standard_name'] for c in global_bank]))
+    _log(video_tag, "=" * 60)
 
     with open(aligned_out_path, 'w', encoding='utf-8') as f:
         json.dump(aligned_results, f, ensure_ascii=False, indent=2)
@@ -247,7 +252,7 @@ def run_stage2(
     with open(bank_out_path, 'w', encoding='utf-8') as f:
         json.dump(lite_bank, f, ensure_ascii=False, indent=2)
 
-    print(f"💾 [核心数据] 对齐后的纯净 JSON 已保存至: {aligned_out_path}")
-    print(f"💾 [附属数据] 全局图鉴文本设定集 已保存至: {bank_out_path}")
+    _log(video_tag, f"💾 [核心数据] 对齐后的纯净 JSON 已保存至: {aligned_out_path}")
+    _log(video_tag, f"💾 [附属数据] 全局图鉴文本设定集 已保存至: {bank_out_path}")
 
     return aligned_out_path, bank_out_path

@@ -41,6 +41,7 @@ def resolve_run_dir(cfg: PipelineConfig, video_path: str, output_root: str) -> s
 
 
 def process_single_video(cfg: PipelineConfig, video_path: str, output_root: str) -> dict:
+    video_tag = sanitize_filename(os.path.splitext(os.path.basename(video_path))[0])
     run_dir = resolve_run_dir(cfg, video_path, output_root)
     os.makedirs(run_dir, exist_ok=True)
 
@@ -72,16 +73,16 @@ def process_single_video(cfg: PipelineConfig, video_path: str, output_root: str)
     }
 
     try:
-        print(f"\n{'#' * 70}\n# 处理视频: {video_path}\n# 运行目录: {run_dir}\n{'#' * 70}")
+        print(f"\n{'#' * 70}\n# [{video_tag}] 处理视频: {video_path}\n# [{video_tag}] 运行目录: {run_dir}\n{'#' * 70}")
 
-        stage1_path = run_stage1(cfg, video_path, run_dir, client, tracker)
+        stage1_path = run_stage1(cfg, video_path, run_dir, client, tracker, video_tag=video_tag)
         result["artifacts"]["stage1_progress"] = stage1_path
 
-        aligned_path, bank_path = run_stage2(cfg, video_path, stage1_path, run_dir, client, tracker)
+        aligned_path, bank_path = run_stage2(cfg, video_path, stage1_path, run_dir, client, tracker, video_tag=video_tag)
         result["artifacts"]["stage2_aligned"] = aligned_path
         result["artifacts"]["stage2_global_bank"] = bank_path
 
-        final_path = run_stage3(cfg, video_path, aligned_path, run_dir, client, tracker)
+        final_path = run_stage3(cfg, video_path, aligned_path, run_dir, client, tracker, video_tag=video_tag)
         result["artifacts"]["stage3_final"] = final_path
 
         this_run["status"] = "completed"
@@ -89,7 +90,7 @@ def process_single_video(cfg: PipelineConfig, video_path: str, output_root: str)
 
     except Exception as e:
         err_text = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-        print(f"\n💥 视频处理失败: {video_path}\n{err_text}")
+        print(f"\n💥 [{video_tag}] 视频处理失败: {video_path}\n{err_text}")
         this_run["status"] = "failed"
         this_run["error"] = err_text
         result["status"] = "failed"
@@ -103,7 +104,7 @@ def process_single_video(cfg: PipelineConfig, video_path: str, output_root: str)
             with open(token_path, 'w', encoding='utf-8') as f:
                 json.dump(token_dict, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"⚠️ token_usage.json 写入失败: {e}")
+            print(f"⚠️ [{video_tag}] token_usage.json 写入失败: {e}")
         _write_meta(meta_path, meta)
 
     return result

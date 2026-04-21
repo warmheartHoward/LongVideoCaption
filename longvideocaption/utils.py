@@ -9,6 +9,14 @@ def format_timestamp(seconds: float) -> str:
     return f"[{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}]"
 
 
+def format_timestamp_sec(seconds: float) -> str:
+    total = int(round(seconds))
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+    return f"[{hours:02d}:{minutes:02d}:{secs:02d}]"
+
+
 def parse_timestamp_to_seconds(ts_str: str) -> float:
     if not isinstance(ts_str, str):
         return 0.0
