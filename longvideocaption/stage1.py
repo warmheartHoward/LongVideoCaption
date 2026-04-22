@@ -10,6 +10,7 @@ from .frame_extractor import (
     get_video_duration,
 )
 from .llm_client import request_llm_with_retry
+from .prompts.stage1_v3 import build_sys_prompt, build_usr_prompt
 from .token_tracker import TokenTracker
 from .utils import format_timestamp, format_timestamp_sec, parse_timestamp_to_seconds
 
@@ -110,8 +111,8 @@ def run_stage1(
             if not base64_frames:
                 chunk_start = chunk_end
                 continue
-            frame_timestamps_str = [format_timestamp(t) for t in valid_timestamps]
-            timestamps_str_list = sorted({format_timestamp_sec(t) for t in valid_timestamps})
+            frame_timestamps_str = [format_timestamp_sec(t) for t in valid_timestamps]
+            timestamps_str_list = sorted(set(frame_timestamps_str))
             for t_str, b64 in zip(frame_timestamps_str, base64_frames):
                 user_content.append({"type": "text", "text": f"画面时间 {t_str}:"})
                 user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"}})
@@ -122,48 +123,8 @@ def run_stage1(
 
         timestamps_str = ", ".join(timestamps_str_list)
 
-        sys_prompt = f"""你是一个资深的影视内容分析家与专业的视频数据打标人员。当前正在分析视频片段：{chunk_name}。
-
-            【🔴 核心分析维度与思维链要求 🔴】
-            1. 强制思维链（CoT）：必须先在 `scene_analysis_scratchpad` 中打草稿，完成时间轴规划与核心事件梳理，再输出具体分析。
-            2. 客观画面描述：专注于肉眼可见的物理细节（动作、神态、空间位置与环境交互），绝不能脑补看不清的微观细节或添加主观色彩。
-            3. 剧情与情绪归因：基于【前情提要】和客观动作，推导人物真实的内心动机、情绪状态及对剧情的推动作用。
-            4. 高密度综合描述（Dense Caption）：将客观画面与主观归因自然融合，输出高质量的剧本级描述。
-
-            【🟡 角色命名与视觉建档（为后期身份对齐做准备） 🟡】
-            5. 代号符号化：给判定为推动剧情的核心角色起个简短自然的代号（如已知真名用真名，无真名用自然代号）。**极其重要：在 step3 中提及他们时，必须使用方括号包裹代号（例如：[红衣女人]、[李雷]）**。背景路人甲无需括号。
-            6. 新面孔建档：如果本片段中出现了【新的/重要的】核心面孔，请在 `new_characters_in_chunk` 中为他/她建立视觉档案，并给出一个最能看清他/她的时间戳。不要去猜测他是不是之前出现过的人，只管记录当前画面的特征。
-
-            【🟢 时间与格式强制约束（绝对服从）】
-            7. 时间轴切分：事件的 `start_time`、`end_time` 以及角色建档的 `anchor_timestamp` 必须严格从以下列表中选取（禁止自我捏造）：
-            可用时间戳白名单：{timestamps_str}
-
-            请严格输出 JSON，禁止用 markdown 代码块包裹。"""
-
-        usr_prompt = f"""【前情提要】\n{previous_context}
-
-            请严格按以下字段顺序输出 JSON（注意：生成顺序即推理顺序，绝对不可乱序）：
-            {{
-            "scene_analysis_scratchpad": "<思维链草稿：1. 从白名单中规划时间切分。2. 梳理核心事件和出现的角色代号。>",
-            "new_characters_in_chunk": [
-                {{
-                "temp_name": "<带方括号的代号，例如 [大眼小恶魔]>",
-                "visual_description": "<纯客观的视觉特征描述：衣着颜色、发型、面部特征、特殊配饰等。严禁写剧情动机。>",
-                "anchor_timestamp": "<从可用时间戳白名单中，选一个该角色面部/特征最清晰的时间点>"
-                }}
-            ],
-            "events": [
-                {{
-                "start_time": "<从白名单列表选取>",
-                "end_time": "<从白名单列表选取>",
-                "step1_objective_visual": "<客观画面描述：他/她实际上做了什么？环境如何？描述真实可见的动作、神态和位置交互。>",
-                "step2_contextual_reasoning": "<剧情与情绪归因：结合【前情提要】，推导角色此时的心理动因、情绪状态及情节张力。>",
-                "step3_synthesized_dense_caption": ""<剧本级高密度融合：拒绝机械拼接！请用充满文学张力的笔触，将 step2 的心理动机、情绪状态作为驱动力，自然地融入到 step1 的物理动作描写中。确保包含[带括号的代号]，字数充实，画面感极强。>"",
-                "key_frame_times": ["<提取最能代表该事件的时间戳>"]
-                }}
-            ],
-            "chunk_summary": "<宏观提炼：总结本片段核心剧情脉络、关键动作与情绪转折，作为下一段的前情提要。>"
-            }}"""
+        sys_prompt = build_sys_prompt(chunk_name, timestamps_str)
+        usr_prompt = build_usr_prompt(previous_context)
 
         user_content.append({"type": "text", "text": usr_prompt})
 
