@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from typing import Tuple
 
 from .config import PipelineConfig
@@ -10,9 +11,21 @@ from .utils import parse_timestamp_to_seconds
 
 STAGE_NAME = "stage3_aggregation"
 
+_ROLE_PATTERN = re.compile(r'\[[^\[\]]+\]')
+
 
 def _log(video_tag: str, msg: str) -> None:
     print(f"[{video_tag}] {msg}" if video_tag else msg)
+
+
+def _extract_event_characters(step3_text: str, name_to_desc: dict) -> list:
+    if not step3_text:
+        return []
+    seen = []
+    for name in _ROLE_PATTERN.findall(step3_text):
+        if name not in seen:
+            seen.append(name)
+    return [{"name": n, "desc": name_to_desc.get(n, "")} for n in seen]
 
 SYS_PROMPT = """你是一个资深的电影剧本统筹。
 你需要阅读一份带有时间戳的视频底层动作流水账，将其聚合并切分为几个符合叙事逻辑的「大章节（Chapters）」。
@@ -72,7 +85,7 @@ def _run_chapter_aggregation(
     return pass2_result, all_events
 
 
-def _assemble_final(video_path: str, pass2_result: dict, all_events: list, video_tag: str = "") -> dict:
+def _assemble_final(video_path: str, pass2_result: dict, all_events: list, name_to_desc: dict, video_tag: str = "") -> dict:
     _log(video_tag, "\n" + "=" * 50)
     _log(video_tag, "🛠️ 启动 Pass 3: Chapter-Event 层级数据物理挂载...")
     _log(video_tag, "=" * 50)
@@ -115,13 +128,15 @@ def _assemble_final(video_path: str, pass2_result: dict, all_events: list, video
             ev_start_sec = parse_timestamp_to_seconds(ev.get("start_time", ""))
 
             if ch_start_sec - 0.5 <= ev_start_sec < ch_end_sec:
+                step3_text = ev.get("step3_synthesized_dense_caption", "")
                 chapter_obj["events"].append({
                     "event_id": f"ev_{(ch_idx+1):02d}_{len(chapter_obj['events'])+1:03d}",
                     "start_time": ev.get("start_time", ""),
                     "end_time": ev.get("end_time", ""),
                     "step1_objective_visual": ev.get("step1_objective_visual", ""),
                     "step2_contextual_reasoning": ev.get("step2_contextual_reasoning", ""),
-                    "step3_synthesized_dense_caption": ev.get("step3_synthesized_dense_caption", ""),
+                    "step3_synthesized_dense_caption": step3_text,
+                    "characters_in_event": _extract_event_characters(step3_text, name_to_desc),
                     "key_frame_times": ev.get("key_frame_times", []),
                 })
 
@@ -134,13 +149,15 @@ def _assemble_final(video_path: str, pass2_result: dict, all_events: list, video
         for ev in all_events:
             ev_start_sec = parse_timestamp_to_seconds(ev.get("start_time", ""))
             if ev_start_sec >= parse_timestamp_to_seconds(last_chapter["end_time"]):
+                step3_text = ev.get("step3_synthesized_dense_caption", "")
                 last_chapter["events"].append({
                     "event_id": f"ev_fallback_{len(last_chapter['events'])+1:03d}",
                     "start_time": ev.get("start_time", ""),
                     "end_time": ev.get("end_time", ""),
                     "step1_objective_visual": ev.get("step1_objective_visual", ""),
                     "step2_contextual_reasoning": ev.get("step2_contextual_reasoning", ""),
-                    "step3_synthesized_dense_caption": ev.get("step3_synthesized_dense_caption", ""),
+                    "step3_synthesized_dense_caption": step3_text,
+                    "characters_in_event": _extract_event_characters(step3_text, name_to_desc),
                     "key_frame_times": ev.get("key_frame_times", []),
                 })
 
@@ -168,8 +185,19 @@ def run_stage3(
     with open(aligned_json_path, 'r', encoding='utf-8') as f:
         aligned_results = json.load(f)
 
+    bank_path = os.path.join(run_dir, "stage2_global_bank.json")
+    name_to_desc = {}
+    if os.path.exists(bank_path):
+        try:
+            with open(bank_path, 'r', encoding='utf-8') as f:
+                lite_bank = json.load(f)
+            name_to_desc = {entry["角色名"]: entry["外貌特征"] for entry in lite_bank}
+            _log(video_tag, f"📖 已加载全局图鉴，收录 {len(name_to_desc)} 名角色，用于 event 级角色映射")
+        except Exception as e:
+            _log(video_tag, f"⚠️ 全局图鉴加载失败，event 角色字段将仅含 name 而无 desc: {e}")
+
     pass2_result, all_events = _run_chapter_aggregation(cfg, aligned_results, client, token_tracker, video_tag)
-    final_storyboard = _assemble_final(video_path, pass2_result, all_events, video_tag)
+    final_storyboard = _assemble_final(video_path, pass2_result, all_events, name_to_desc, video_tag)
 
     with open(final_output_path, 'w', encoding='utf-8') as f:
         json.dump(final_storyboard, f, ensure_ascii=False, indent=2)

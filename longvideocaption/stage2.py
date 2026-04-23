@@ -133,7 +133,11 @@ def run_stage2(
         data = chunk.get("data", {})
 
         current_story = data.get("chunk_summary", "")
-        current_chars = data.get("new_characters_in_chunk", []) or []
+        current_chars = (
+            data.get("characters_in_chunk")
+            or data.get("new_characters_in_chunk")
+            or []
+        )
 
         _log(video_tag, f"\n🔍 分析 {chunk_range} | 发现待定面孔: {len(current_chars)} 个")
 
