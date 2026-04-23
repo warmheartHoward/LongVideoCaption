@@ -20,7 +20,7 @@ class PipelineConfig:
     target_fps: float = 1.0
     frame_max_width: int = 960
     frame_jpg_quality: int = 90
-    llm_temperature: float = 0.4
+    llm_temperature: float = 0.2
     llm_max_tokens: int = 16384
 
     stage2_temperature: float = 0.1
