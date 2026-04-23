@@ -22,6 +22,7 @@ class PipelineConfig:
     frame_jpg_quality: int = 90
     llm_temperature: float = 0.2
     llm_max_tokens: int = 16384
+    prev_event_overlap_count: int = 0
 
     stage2_temperature: float = 0.1
     stage2_max_tokens: int = 16384
@@ -49,4 +50,5 @@ def hyper_signature(cfg: PipelineConfig) -> str:
         f"__mf{cfg.max_frames_per_chunk}"
         f"__sc{scene}"
         f"__fw{cfg.frame_max_width}"
+        f"__ovlp{cfg.prev_event_overlap_count}"
     )
