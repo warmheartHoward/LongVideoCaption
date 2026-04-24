@@ -137,8 +137,7 @@ def _validate_and_snap_event_times(
         target = parse_timestamp_to_seconds(ts_str)
         nearest_str, nearest_sec = min(sorted_items, key=lambda p: abs(p[1] - target))
         delta = abs(nearest_sec - target)
-        tag = "⚠️" if delta > 1.5 else "ℹ️"
-        _log(video_tag, f"  {tag} [时间戳校准] {label}={ts_str} → {nearest_str} (Δ={delta:.2f}s)")
+        _log(video_tag, f"  ⚠️ [时间戳校准] {label}={ts_str} → {nearest_str} (Δ={delta:.2f}s)")
         return nearest_str, nearest_sec
 
     def _clamp_left(cur_str: str, cur_sec: float) -> Tuple[str, float]:
@@ -181,8 +180,15 @@ def _validate_and_snap_event_times(
         ev["end_time"] = end_str
 
         for kft in ev.get("key_frame_times", []) or []:
-            if isinstance(kft, str) and kft not in whitelist_map:
-                _log(video_tag, f"  ⚠️ [时间戳校准] event[{idx}].key_frame_times 含非白名单项: {kft}")
+            if not isinstance(kft, str):
+                continue
+            kft_sec = parse_timestamp_to_seconds(kft)
+            if not (start_sec - 0.1 <= kft_sec <= end_sec + 0.1):
+                _log(
+                    video_tag,
+                    f"  ⚠️ [时间戳校准] event[{idx}].key_frame_times={kft} "
+                    f"越出 [{start_str}, {end_str}] 区间",
+                )
 
     for di in reversed(drop_indices):
         events.pop(di)
@@ -202,8 +208,7 @@ def _validate_revision_end_time(revision, whitelist_str_list: list, video_tag: s
     target = parse_timestamp_to_seconds(end_str)
     nearest_str, nearest_sec = min(whitelist_map.items(), key=lambda p: abs(p[1] - target))
     delta = abs(nearest_sec - target)
-    tag = "⚠️" if delta > 1.5 else "ℹ️"
-    _log(video_tag, f"  {tag} [时间戳校准] revision.end={end_str} → {nearest_str} (Δ={delta:.2f}s)")
+    _log(video_tag, f"  ⚠️ [时间戳校准] revision.end={end_str} → {nearest_str} (Δ={delta:.2f}s)")
     revision["end_time"] = nearest_str
 
 
