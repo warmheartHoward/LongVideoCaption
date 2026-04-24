@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 from typing import Optional, Tuple
 
 from .config import PipelineConfig
@@ -12,14 +13,54 @@ from .frame_extractor import (
 from .llm_client import request_llm_with_retry
 from .prompts.stage1_v3 import build_sys_prompt, build_usr_prompt
 from .token_tracker import TokenTracker
-from .utils import format_timestamp, format_timestamp_sec, parse_timestamp_to_seconds
+from .utils import format_timestamp, format_timestamp_sec, parse_timestamp_to_seconds, sanitize_filename
 
 
 STAGE_NAME = "stage1_perception"
 
+_log_context = threading.local()
+
 
 def _log(video_tag: str, msg: str) -> None:
-    print(f"[{video_tag}] {msg}" if video_tag else msg)
+    line = f"[{video_tag}] {msg}" if video_tag else msg
+    print(line)
+    log_path = getattr(_log_context, "log_file", None)
+    if log_path:
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
+
+
+def _save_chunk_prompt(
+    run_dir: str,
+    chunk_idx: int,
+    chunk_name: str,
+    chunk_start: float,
+    chunk_end: float,
+    usr_prompt: str,
+    previous_context: str,
+    timestamps_str_list: list,
+) -> None:
+    prompts_dir = os.path.join(run_dir, "_stage1_prompts")
+    os.makedirs(prompts_dir, exist_ok=True)
+    safe_chunk = sanitize_filename(chunk_name.replace(" ", "")).strip("[]")
+    path = os.path.join(prompts_dir, f"chunk_{chunk_idx:03d}_{safe_chunk}.json")
+    payload = {
+        "chunk_index": chunk_idx,
+        "chunk_name": chunk_name,
+        "chunk_start_sec": chunk_start,
+        "chunk_end_sec": chunk_end,
+        "previous_context": previous_context,
+        "timestamps_whitelist": timestamps_str_list,
+        "usr_prompt": usr_prompt,
+    }
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ 保存 chunk prompt 失败: {e}")
 
 
 def _format_overlap_events(events_slice: list) -> str:
@@ -132,9 +173,10 @@ def _validate_and_snap_event_times(
     sorted_items = sorted(whitelist_map.items(), key=lambda p: p[1])
 
     def _snap(ts_str: str, label: str) -> Tuple[str, float]:
-        if ts_str in whitelist_map:
-            return ts_str, whitelist_map[ts_str]
         target = parse_timestamp_to_seconds(ts_str)
+        for wl_str, wl_sec in sorted_items:
+            if abs(wl_sec - target) < 0.01:
+                return wl_str, wl_sec
         nearest_str, nearest_sec = min(sorted_items, key=lambda p: abs(p[1] - target))
         delta = abs(nearest_sec - target)
         _log(video_tag, f"  ⚠️ [时间戳校准] {label}={ts_str} → {nearest_str} (Δ={delta:.2f}s)")
@@ -195,17 +237,22 @@ def _validate_and_snap_event_times(
 
 
 def _validate_revision_end_time(revision, whitelist_str_list: list, video_tag: str) -> None:
-    """校验 prev_event_revision.end_time 是否在白名单，不在则 snap。start_time 沿用不改。"""
+    """校验 prev_event_revision.end_time 是否在白名单（按秒数比对，容差 0.01s）。"""
     if not isinstance(revision, dict) or not revision.get("need_merge"):
         return
     if not whitelist_str_list:
         return
     end_str = revision.get("end_time", "")
-    if not end_str or end_str in whitelist_str_list:
+    if not end_str:
         return
 
     whitelist_map = {s: parse_timestamp_to_seconds(s) for s in whitelist_str_list}
     target = parse_timestamp_to_seconds(end_str)
+    for wl_str, wl_sec in whitelist_map.items():
+        if abs(wl_sec - target) < 0.01:
+            revision["end_time"] = wl_str
+            return
+
     nearest_str, nearest_sec = min(whitelist_map.items(), key=lambda p: abs(p[1] - target))
     delta = abs(nearest_sec - target)
     _log(video_tag, f"  ⚠️ [时间戳校准] revision.end={end_str} → {nearest_str} (Δ={delta:.2f}s)")
@@ -292,6 +339,8 @@ def run_stage1(
     os.makedirs(run_dir, exist_ok=True)
     pass1_output_path = os.path.join(run_dir, "stage1_progress.json")
     temp_dir = os.path.join(run_dir, "_tmp")
+
+    _log_context.log_file = os.path.join(run_dir, "stage1.log")
 
     total_duration = float(int(get_video_duration(video_path)))
 
@@ -385,6 +434,17 @@ def run_stage1(
         usr_prompt = build_usr_prompt(previous_context)
 
         user_content.append({"type": "text", "text": usr_prompt})
+
+        _save_chunk_prompt(
+            run_dir=run_dir,
+            chunk_idx=len(global_results),
+            chunk_name=chunk_name,
+            chunk_start=chunk_start,
+            chunk_end=chunk_end,
+            usr_prompt=usr_prompt,
+            previous_context=previous_context,
+            timestamps_str_list=timestamps_str_list,
+        )
 
         next_start = chunk_start + (cfg.chunk_duration_sec * 0.8)
 
