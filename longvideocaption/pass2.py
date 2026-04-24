@@ -138,6 +138,15 @@ def _next_cluster_id(global_bank: list) -> str:
     return f"cluster_{len(global_bank) + 1:04d}"
 
 
+_NAME_STRIP_CHARS = "[]【】《》〈〉<>「」『』 \t\r\n"
+
+
+def _normalize_name(name) -> str:
+    if not isinstance(name, str):
+        return ""
+    return name.strip().strip(_NAME_STRIP_CHARS).strip().lower()
+
+
 def _prime_cluster_frame_cache(video_path: str, global_bank: list, cfg: PipelineConfig) -> Dict[str, str]:
     cache: Dict[str, str] = {}
     for cluster in global_bank:
@@ -267,17 +276,28 @@ def _phase_a_rolling(cfg, video_path, pass1_results, global_bank, chunk_mappings
 
         if align_result is not None:
             valid_cluster_ids = {g["cluster_id"] for g in global_bank}
+            norm_char_lookup: Dict[str, dict] = {}
+            for c in current_chars:
+                norm_key = _normalize_name(c.get("temp_name", ""))
+                if norm_key and norm_key not in norm_char_lookup:
+                    norm_char_lookup[norm_key] = c
+
             for mapping in align_result.get("chunk_identity_mapping", []):
-                temp_name = mapping.get("temp_name_in_chunk")
-                match_result = mapping.get("match_result")
+                temp_name_raw = mapping.get("temp_name_in_chunk")
+                match_result = (mapping.get("match_result") or "").strip()
                 conf_score = mapping.get("confidence_score", 100)
 
-                if not temp_name:
+                if not temp_name_raw:
                     continue
-                matched_char = next((c for c in current_chars if c.get("temp_name") == temp_name), None)
+                norm_key = _normalize_name(temp_name_raw)
+                matched_char = norm_char_lookup.get(norm_key)
                 if not matched_char:
-                    _log(video_tag, f"    ⚠️ 模型输出的 temp_name 不在当前片段: {temp_name}，忽略")
+                    _log(video_tag, f"    ⚠️ 模型输出的 temp_name 不在当前片段: {temp_name_raw!r}（归一化后={norm_key!r}），忽略")
                     continue
+
+                temp_name = matched_char.get("temp_name", "") or temp_name_raw
+                if temp_name_raw != temp_name:
+                    _log(video_tag, f"    ℹ️ temp_name 规范化: 模型输出 {temp_name_raw!r} → 使用原始 {temp_name!r}")
 
                 force_new = False
                 if match_result != "NEW":
@@ -586,9 +606,12 @@ def _phase_c_rewrite(pass1_results, global_bank, chunk_mappings, final_info, vid
                 if not info:
                     continue
                 final_name = info.get("final_global_name", "")
-                if not final_name:
+                if not final_name or not temp_name:
                     continue
                 before = new_caption
+                stripped = temp_name.strip()
+                if not (stripped.startswith("[") and stripped.endswith("]")):
+                    new_caption = safe_replace(new_caption, f"[{stripped}]", final_name)
                 new_caption = safe_replace(new_caption, temp_name, final_name)
                 if new_caption != before:
                     total_replacements += 1

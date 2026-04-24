@@ -364,6 +364,22 @@ def run_pass1(
                 global_results = json.load(f)
 
             if global_results:
+                last_chunk_range = global_results[-1].get("chunk_time_range", "")
+                last_chunk_end_sec = None
+                if isinstance(last_chunk_range, str) and " - " in last_chunk_range:
+                    last_chunk_end_sec = parse_timestamp_to_seconds(
+                        last_chunk_range.split(" - ", 1)[1]
+                    )
+
+                if last_chunk_end_sec is not None and last_chunk_end_sec >= total_duration - 0.01:
+                    _log(video_tag, "\n=========================================")
+                    _log(
+                        video_tag,
+                        f"✅ 检测到 Pass 1 历史产物已覆盖到视频末尾 "
+                        f"({format_timestamp(total_duration)})，跳过 Pass 1。",
+                    )
+                    return pass1_output_path
+
                 _log(video_tag, "\n=========================================")
                 _log(video_tag, "🔄 检测到历史运行记录，尝试恢复断点...")
 
