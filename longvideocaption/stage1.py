@@ -52,6 +52,14 @@ def _build_previous_context(
             f"【全局剧情脉络】:\n{accumulated_story}\n\n"
             f"【⚠️ 视觉重叠回顾区间】：本片段画面 [{format_timestamp(next_chunk_start_sec)} ~ {last_end_str}] "
             f"是上一片段最后若干个 event 的视觉回顾，仅作为前情上下文展示，**严禁对此区间重新创建 event**。\n\n"
+            f"【⚠️ 跨chunk截断判定任务】：\n"
+            f"上段最后一个 event 的 end_time 为 {last_end_str}，恰好落在上段 chunk 边界。"
+            f"请结合本段开头画面，判断「上段重叠区间中 end_time 为 {last_end_str} 的那个 event」"
+            f"的动作是否在上段已真正完成：\n"
+            f"  • 若已完成 → 顶层字段 `prev_event_revision` 填 null，events[0] 从 {last_end_str} 之后开始；\n"
+            f"  • 若动作延续至本段（未完成） → 顶层字段 `prev_event_revision` 填修订对象"
+            f"（结构见下方 JSON schema 说明），且 events[0] 必须从修订后的 end_time 之后开始，"
+            f"严禁把延续部分再次作为独立 event 重复打标。\n\n"
             f"【上段重叠区间·完整 event 输出（step1/step2/step3 全量）】"
             f"（仅作为上下文参考，禁止复写、改写或重新切分；新 event 必须从 {last_end_str} 之后开始）:\n"
             f"{overlap_text}\n\n"
@@ -99,6 +107,149 @@ def _pick_next_start(
         return last_end_sec, last_end_str, last_action, False, 0
 
     return proposed, last_end_str, last_action, True, k
+
+
+def _validate_and_snap_event_times(
+    events: list,
+    whitelist_str_list: list,
+    chunk_start: float,
+    chunk_end: float,
+    video_tag: str,
+) -> None:
+    """就地校验 events 的 start_time/end_time，把非白名单值 snap 到最近的合法项。
+
+    - 白名单为空 → 直接跳过
+    - 非白名单 → snap 到最近项（Δ>1.5s 记 WARN，否则 INFO）
+    - start > end → swap
+    - end - start < 0.1s → 丢弃该 event
+    - 越出 chunk 边界 > 0.5s → clamp 到 chunk 内最近白名单
+    - key_frame_times 仅 WARN 不 snap
+    """
+    if not whitelist_str_list or not events:
+        return
+
+    whitelist_map = {s: parse_timestamp_to_seconds(s) for s in whitelist_str_list}
+    sorted_items = sorted(whitelist_map.items(), key=lambda p: p[1])
+
+    def _snap(ts_str: str, label: str) -> Tuple[str, float]:
+        if ts_str in whitelist_map:
+            return ts_str, whitelist_map[ts_str]
+        target = parse_timestamp_to_seconds(ts_str)
+        nearest_str, nearest_sec = min(sorted_items, key=lambda p: abs(p[1] - target))
+        delta = abs(nearest_sec - target)
+        tag = "⚠️" if delta > 1.5 else "ℹ️"
+        _log(video_tag, f"  {tag} [时间戳校准] {label}={ts_str} → {nearest_str} (Δ={delta:.2f}s)")
+        return nearest_str, nearest_sec
+
+    def _clamp_left(cur_str: str, cur_sec: float) -> Tuple[str, float]:
+        if cur_sec >= chunk_start - 0.5:
+            return cur_str, cur_sec
+        for s, sv in sorted_items:
+            if sv >= chunk_start - 0.1:
+                _log(video_tag, f"  ⚠️ [时间戳校准] start={cur_str} 越出 chunk 左界 {chunk_start:.2f}s，clamp 至 {s}")
+                return s, sv
+        return cur_str, cur_sec
+
+    def _clamp_right(cur_str: str, cur_sec: float) -> Tuple[str, float]:
+        if cur_sec <= chunk_end + 0.5:
+            return cur_str, cur_sec
+        for s, sv in reversed(sorted_items):
+            if sv <= chunk_end + 0.1:
+                _log(video_tag, f"  ⚠️ [时间戳校准] end={cur_str} 越出 chunk 右界 {chunk_end:.2f}s，clamp 至 {s}")
+                return s, sv
+        return cur_str, cur_sec
+
+    drop_indices = []
+    for idx, ev in enumerate(events):
+        start_str, start_sec = _snap(ev.get("start_time", ""), f"event[{idx}].start")
+        end_str, end_sec = _snap(ev.get("end_time", ""), f"event[{idx}].end")
+
+        if start_sec > end_sec:
+            _log(video_tag, f"  ⚠️ [时间戳校准] event[{idx}] start>end，自动交换 ({start_str} ↔ {end_str})")
+            start_str, end_str = end_str, start_str
+            start_sec, end_sec = end_sec, start_sec
+
+        if end_sec - start_sec < 0.1:
+            _log(video_tag, f"  ⚠️ [时间戳校准] event[{idx}] Δ={end_sec - start_sec:.3f}s < 0.1s，丢弃")
+            drop_indices.append(idx)
+            continue
+
+        start_str, start_sec = _clamp_left(start_str, start_sec)
+        end_str, end_sec = _clamp_right(end_str, end_sec)
+
+        ev["start_time"] = start_str
+        ev["end_time"] = end_str
+
+        for kft in ev.get("key_frame_times", []) or []:
+            if isinstance(kft, str) and kft not in whitelist_map:
+                _log(video_tag, f"  ⚠️ [时间戳校准] event[{idx}].key_frame_times 含非白名单项: {kft}")
+
+    for di in reversed(drop_indices):
+        events.pop(di)
+
+
+def _validate_revision_end_time(revision, whitelist_str_list: list, video_tag: str) -> None:
+    """校验 prev_event_revision.end_time 是否在白名单，不在则 snap。start_time 沿用不改。"""
+    if not isinstance(revision, dict) or not revision.get("need_merge"):
+        return
+    if not whitelist_str_list:
+        return
+    end_str = revision.get("end_time", "")
+    if not end_str or end_str in whitelist_str_list:
+        return
+
+    whitelist_map = {s: parse_timestamp_to_seconds(s) for s in whitelist_str_list}
+    target = parse_timestamp_to_seconds(end_str)
+    nearest_str, nearest_sec = min(whitelist_map.items(), key=lambda p: abs(p[1] - target))
+    delta = abs(nearest_sec - target)
+    tag = "⚠️" if delta > 1.5 else "ℹ️"
+    _log(video_tag, f"  {tag} [时间戳校准] revision.end={end_str} → {nearest_str} (Δ={delta:.2f}s)")
+    revision["end_time"] = nearest_str
+
+
+def _apply_prev_event_revision(chunk_data: dict, global_results: list, video_tag: str) -> None:
+    """若模型在本段输出中携带 prev_event_revision=need_merge，就地修订上一段 chunk 的 events[-1]。
+
+    - 始终从 chunk_data 中 pop 该字段（避免污染当前 chunk 产物）。
+    - 仅当 need_merge=True 且 revision.start_time 与上段末事件匹配时才覆盖。
+    - 非法或匹配失败时记日志跳过，不影响主流程。
+    """
+    revision = chunk_data.pop("prev_event_revision", None)
+    if not isinstance(revision, dict):
+        return
+    if not revision.get("need_merge"):
+        return
+    if not global_results:
+        _log(video_tag, "⚠️ [修订跳过] 无上段 chunk 可供修订，忽略 prev_event_revision")
+        return
+
+    prev_events = global_results[-1].get("data", {}).get("events", [])
+    if not prev_events:
+        _log(video_tag, "⚠️ [修订跳过] 上段 chunk 无 events，忽略 prev_event_revision")
+        return
+
+    last_ev = prev_events[-1]
+    if revision.get("start_time") != last_ev.get("start_time"):
+        _log(
+            video_tag,
+            f"⚠️ [修订跳过] revision.start_time={revision.get('start_time')} "
+            f"与上段末事件 start_time={last_ev.get('start_time')} 不匹配",
+        )
+        return
+
+    old_end = last_ev.get("end_time", "")
+    prev_events[-1] = {
+        "start_time": revision["start_time"],
+        "end_time": revision.get("end_time", old_end),
+        "step1_objective_visual": revision.get("step1_objective_visual", last_ev.get("step1_objective_visual", "")),
+        "step2_contextual_reasoning": revision.get("step2_contextual_reasoning", last_ev.get("step2_contextual_reasoning", "")),
+        "step3_synthesized_dense_caption": revision.get("step3_synthesized_dense_caption", last_ev.get("step3_synthesized_dense_caption", "")),
+        "key_frame_times": revision.get("key_frame_times", last_ev.get("key_frame_times", [])),
+    }
+    _log(
+        video_tag,
+        f"🔧 [跨chunk合并] 修订上段末尾 event: end_time {old_end} → {prev_events[-1]['end_time']}",
+    )
 
 
 def _resume_from_progress(
@@ -240,6 +391,21 @@ def run_stage1(
                 max_retries=cfg.max_retries, chunk_name=log_tag,
                 token_tracker=token_tracker, stage=STAGE_NAME,
             )
+
+            _validate_and_snap_event_times(
+                chunk_data.get("events", []),
+                timestamps_str_list,
+                chunk_start, chunk_end,
+                video_tag,
+            )
+            _validate_revision_end_time(
+                chunk_data.get("prev_event_revision"),
+                timestamps_str_list,
+                video_tag,
+            )
+
+            _apply_prev_event_revision(chunk_data, global_results, video_tag)
+
             global_results.append({"chunk_time_range": chunk_name, "data": chunk_data})
 
             with open(pass1_output_path, 'w', encoding='utf-8') as f:
