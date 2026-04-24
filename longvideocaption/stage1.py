@@ -263,11 +263,14 @@ def _apply_prev_event_revision(chunk_data: dict, global_results: list, video_tag
     """若模型在本段输出中携带 prev_event_revision=need_merge，就地修订上一段 chunk 的 events[-1]。
 
     - 始终从 chunk_data 中 pop 该字段（避免污染当前 chunk 产物）。
-    - 仅当 need_merge=True 且 revision.start_time 与上段末事件匹配时才覆盖。
+    - 仅当 need_merge=True 且 revision.start_time 与上段末事件匹配（按秒数比对，容差 0.01s）时才覆盖。
     - 非法或匹配失败时记日志跳过，不影响主流程。
     """
     revision = chunk_data.pop("prev_event_revision", None)
+    if revision is None:
+        return
     if not isinstance(revision, dict):
+        _log(video_tag, f"⚠️ [修订跳过] prev_event_revision 非字典类型: {type(revision).__name__}")
         return
     if not revision.get("need_merge"):
         return
@@ -281,18 +284,24 @@ def _apply_prev_event_revision(chunk_data: dict, global_results: list, video_tag
         return
 
     last_ev = prev_events[-1]
-    if revision.get("start_time") != last_ev.get("start_time"):
+    last_start_raw = last_ev.get("start_time", "")
+    rev_start_raw = revision.get("start_time", "")
+    last_start_sec = parse_timestamp_to_seconds(last_start_raw)
+    rev_start_sec = parse_timestamp_to_seconds(rev_start_raw)
+
+    if abs(last_start_sec - rev_start_sec) > 0.01:
         _log(
             video_tag,
-            f"⚠️ [修订跳过] revision.start_time={revision.get('start_time')} "
-            f"与上段末事件 start_time={last_ev.get('start_time')} 不匹配",
+            f"⚠️ [修订跳过] revision.start_time={rev_start_raw!r} ({rev_start_sec:.2f}s) "
+            f"与上段末事件 start_time={last_start_raw!r} ({last_start_sec:.2f}s) 不匹配",
         )
         return
 
     old_end = last_ev.get("end_time", "")
+    new_end = revision.get("end_time", old_end)
     prev_events[-1] = {
-        "start_time": revision["start_time"],
-        "end_time": revision.get("end_time", old_end),
+        "start_time": last_start_raw,
+        "end_time": new_end,
         "step1_objective_visual": revision.get("step1_objective_visual", last_ev.get("step1_objective_visual", "")),
         "step2_contextual_reasoning": revision.get("step2_contextual_reasoning", last_ev.get("step2_contextual_reasoning", "")),
         "step3_synthesized_dense_caption": revision.get("step3_synthesized_dense_caption", last_ev.get("step3_synthesized_dense_caption", "")),
@@ -300,7 +309,7 @@ def _apply_prev_event_revision(chunk_data: dict, global_results: list, video_tag
     }
     _log(
         video_tag,
-        f"🔧 [跨chunk合并] 修订上段末尾 event: end_time {old_end} → {prev_events[-1]['end_time']}",
+        f"🔧 [跨chunk合并] 修订上段末尾 event: end_time {old_end} → {new_end}",
     )
 
 
@@ -514,6 +523,10 @@ def run_stage1(
 
         except Exception as e:
             _log(video_tag, f"❌ [严重跳过] Chunk {chunk_name} 多次尝试均失败: {e}")
+
+        if chunk_end >= total_duration - 0.01:
+            _log(video_tag, f"🏁 已处理到视频末尾 ({format_timestamp(total_duration)})，Stage 1 结束。")
+            break
 
         chunk_start = next_start
 
