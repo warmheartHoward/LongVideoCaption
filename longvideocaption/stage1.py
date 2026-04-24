@@ -105,7 +105,7 @@ def _build_previous_context(
             f"（仅作为上下文参考，禁止复写、改写或重新切分；新 event 必须从 {last_end_str} 之后开始）:\n"
             f"{overlap_text}\n\n"
             f"【当前接力要求】: 上一幕最后一个事件是：'{last_action}'，结束于 {last_end_str}。"
-            f"请从 {last_end_str} 开始切分新事件，紧接着这个动作和时间点继续描述。"
+            # f"请从 {last_end_str} 开始切分新事件，紧接着这个动作和时间点继续描述。"
         )
     return (
         f"【全局剧情脉络】:\n{accumulated_story}\n\n"
