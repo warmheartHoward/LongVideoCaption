@@ -1,4 +1,4 @@
-"""Stage 1 prompt — v1 (semantic event segmentation baseline).
+"""Pass 1 prompt — v1 (semantic event segmentation baseline).
 
 保留作为历史基线版本。运行时默认加载 v2 及以后。
 """

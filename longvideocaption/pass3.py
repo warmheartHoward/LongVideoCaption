@@ -9,7 +9,7 @@ from .token_tracker import TokenTracker
 from .utils import parse_timestamp_to_seconds
 
 
-STAGE_NAME = "stage3_aggregation"
+PASS_NAME = "pass3_aggregation"
 
 _ROLE_PATTERN = re.compile(r'\[[^\[\]]+\]')
 
@@ -58,7 +58,7 @@ def _run_chapter_aggregation(
     video_tag: str = "",
 ) -> Tuple[dict, list]:
     _log(video_tag, "\n" + "=" * 50)
-    _log(video_tag, "🎬 启动 Pass 2: 宏观章节 (Chapter) 逻辑切分...")
+    _log(video_tag, "🎬 [Pass 3 · 子步骤 A] 宏观章节 (Chapter) 逻辑切分...")
     _log(video_tag, "=" * 50)
 
     all_events = []
@@ -75,28 +75,28 @@ def _run_chapter_aggregation(
     user_prompt = f"【完整底层时间轴】:\n{timeline_text}\n\n请严格基于时间轴进行章节切分，输出 JSON。"
 
     log_tag = f"[{video_tag}] 章节切分" if video_tag else "章节切分"
-    pass2_result = request_llm_with_retry(
+    chapter_agg_result = request_llm_with_retry(
         client=client, model=cfg.model_name,
         messages=[{"role": "system", "content": SYS_PROMPT}, {"role": "user", "content": user_prompt}],
-        max_tokens=cfg.stage3_max_tokens, temperature=cfg.stage3_temperature,
+        max_tokens=cfg.pass3_max_tokens, temperature=cfg.pass3_temperature,
         max_retries=cfg.max_retries, chunk_name=log_tag,
-        token_tracker=token_tracker, stage=STAGE_NAME,
+        token_tracker=token_tracker, stage=PASS_NAME,
     )
-    return pass2_result, all_events
+    return chapter_agg_result, all_events
 
 
-def _assemble_final(video_path: str, pass2_result: dict, all_events: list, name_to_desc: dict, video_tag: str = "") -> dict:
+def _assemble_final(video_path: str, chapter_agg_result: dict, all_events: list, name_to_desc: dict, video_tag: str = "") -> dict:
     _log(video_tag, "\n" + "=" * 50)
-    _log(video_tag, "🛠️ 启动 Pass 3: Chapter-Event 层级数据物理挂载...")
+    _log(video_tag, "🛠️ [Pass 3 · 子步骤 B] Chapter-Event 层级数据物理挂载...")
     _log(video_tag, "=" * 50)
 
     final_json = {
         "video_path": video_path,
-        "video_summary": pass2_result.get("video_summary", "全片剧情总结提取失败"),
+        "video_summary": chapter_agg_result.get("video_summary", "全片剧情总结提取失败"),
         "chapters": [],
     }
 
-    chapters_def = pass2_result.get("chapters", [])
+    chapters_def = chapter_agg_result.get("chapters", [])
     if not chapters_def:
         _log(video_tag, "❌ 未获取到章节定义，将采用兜底单章节模式。")
         chapters_def = [{
@@ -164,7 +164,7 @@ def _assemble_final(video_path: str, pass2_result: dict, all_events: list, name_
     return final_json
 
 
-def run_stage3(
+def run_pass3(
     cfg: PipelineConfig,
     video_path: str,
     aligned_json_path: str,
@@ -174,18 +174,18 @@ def run_stage3(
     video_tag: str = "",
 ) -> str:
     os.makedirs(run_dir, exist_ok=True)
-    final_output_path = os.path.join(run_dir, "stage3_final.json")
+    final_output_path = os.path.join(run_dir, "pass3_final.json")
 
     if os.path.exists(final_output_path):
         _log(video_tag, "\n" + "=" * 50)
-        _log(video_tag, "⏭️  Stage 3 终产物已存在，跳过装配。")
+        _log(video_tag, "⏭️  Pass 3 终产物已存在，跳过装配。")
         _log(video_tag, "=" * 50)
         return final_output_path
 
     with open(aligned_json_path, 'r', encoding='utf-8') as f:
         aligned_results = json.load(f)
 
-    bank_path = os.path.join(run_dir, "stage2_global_bank.json")
+    bank_path = os.path.join(run_dir, "pass2_global_bank.json")
     name_to_desc = {}
     if os.path.exists(bank_path):
         try:
@@ -196,8 +196,8 @@ def run_stage3(
         except Exception as e:
             _log(video_tag, f"⚠️ 全局图鉴加载失败，event 角色字段将仅含 name 而无 desc: {e}")
 
-    pass2_result, all_events = _run_chapter_aggregation(cfg, aligned_results, client, token_tracker, video_tag)
-    final_storyboard = _assemble_final(video_path, pass2_result, all_events, name_to_desc, video_tag)
+    chapter_agg_result, all_events = _run_chapter_aggregation(cfg, aligned_results, client, token_tracker, video_tag)
+    final_storyboard = _assemble_final(video_path, chapter_agg_result, all_events, name_to_desc, video_tag)
 
     with open(final_output_path, 'w', encoding='utf-8') as f:
         json.dump(final_storyboard, f, ensure_ascii=False, indent=2)

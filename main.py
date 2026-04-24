@@ -11,7 +11,7 @@ warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Long Video Caption — 三阶段长视频打标（支持文件夹批量 + 多线程 + 断点续打）"
+        description="Long Video Caption — 三遍扫描式长视频打标（支持文件夹批量 + 多线程 + 断点续打）"
     )
     p.add_argument("--input", required=True, help="视频文件或文件夹路径")
     p.add_argument("--output", required=True, help="输出根目录")
@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--frame-width", type=int, default=None, help="覆盖 frame_max_width")
     p.add_argument("--target-fps", type=float, default=None, help="覆盖 target_fps")
 
-    p.add_argument("--conf-thresh", type=int, default=None, help="覆盖 stage2_confidence_threshold")
+    p.add_argument("--conf-thresh", type=int, default=None, help="覆盖 pass2_confidence_threshold")
     return p
 
 
@@ -60,7 +60,7 @@ def main(argv=None) -> int:
         cfg.target_fps = args.target_fps
 
     if args.conf_thresh is not None:
-        cfg.stage2_confidence_threshold = args.conf_thresh
+        cfg.pass2_confidence_threshold = args.conf_thresh
 
     run_batch(cfg, args.input, args.output)
     return 0

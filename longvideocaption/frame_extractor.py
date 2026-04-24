@@ -134,7 +134,7 @@ def get_raw_chunk_video_base64(
     return valid_timestamps, video_b64
 
 
-def extract_single_frame_base64(video_path: str, timestamp_str: str, max_width: int = 960) -> str:
+def extract_single_frame_base64(video_path: str, timestamp_str: str, max_width=960, jpg_quality: int = 90) -> str:
     if not isinstance(timestamp_str, str):
         return ""
     clean_str = timestamp_str.strip('[] ')
@@ -154,14 +154,19 @@ def extract_single_frame_base64(video_path: str, timestamp_str: str, max_width: 
         orig_fps = cap.get(cv2.CAP_PROP_FPS)
         orig_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
         orig_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-        scale = max_width / orig_width if orig_width > max_width else 1.0
+
+        if max_width is None or max_width <= 0 or orig_width <= max_width:
+            scale = 1.0
+        else:
+            scale = max_width / orig_width
 
         cap.set(cv2.CAP_PROP_POS_FRAMES, int(seconds * orig_fps))
         ret, frame = cap.read()
         b64_str = ""
         if ret:
-            resized = cv2.resize(frame, (int(orig_width * scale), int(orig_height * scale)))
-            _, buffer = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+            if scale < 1.0:
+                frame = cv2.resize(frame, (int(orig_width * scale), int(orig_height * scale)), interpolation=cv2.INTER_AREA)
+            _, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), int(jpg_quality)])
             b64_str = base64.b64encode(buffer).decode('utf-8')
         cap.release()
         return b64_str

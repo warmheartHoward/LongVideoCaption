@@ -52,3 +52,10 @@ def sanitize_filename(name: str) -> str:
     s = _INVALID_FS_CHARS.sub("_", name)
     s = s.strip(" .")
     return s or "unnamed"
+
+
+def safe_replace(text: str, old: str, new: str) -> str:
+    if not isinstance(text, str) or not old or old == new:
+        return text
+    pattern = r"(?<![\w一-鿿])" + re.escape(old) + r"(?![\w一-鿿])"
+    return re.sub(pattern, new, text)

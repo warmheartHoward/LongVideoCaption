@@ -5,9 +5,9 @@ from datetime import datetime
 
 from .config import PipelineConfig, hyper_signature
 from .llm_client import build_client
-from .stage1 import run_stage1
-from .stage2 import run_stage2
-from .stage3 import run_stage3
+from .pass1 import run_pass1
+from .pass2 import run_pass2
+from .pass3 import run_pass3
 from .token_tracker import TokenTracker
 from .utils import sanitize_filename
 
@@ -75,15 +75,15 @@ def process_single_video(cfg: PipelineConfig, video_path: str, output_root: str)
     try:
         print(f"\n{'#' * 70}\n# [{video_tag}] 处理视频: {video_path}\n# [{video_tag}] 运行目录: {run_dir}\n{'#' * 70}")
 
-        stage1_path = run_stage1(cfg, video_path, run_dir, client, tracker, video_tag=video_tag)
-        result["artifacts"]["stage1_progress"] = stage1_path
+        pass1_path = run_pass1(cfg, video_path, run_dir, client, tracker, video_tag=video_tag)
+        result["artifacts"]["pass1_progress"] = pass1_path
 
-        aligned_path, bank_path = run_stage2(cfg, video_path, stage1_path, run_dir, client, tracker, video_tag=video_tag)
-        result["artifacts"]["stage2_aligned"] = aligned_path
-        result["artifacts"]["stage2_global_bank"] = bank_path
+        aligned_path, bank_path = run_pass2(cfg, video_path, pass1_path, run_dir, client, tracker, video_tag=video_tag)
+        result["artifacts"]["pass2_aligned"] = aligned_path
+        result["artifacts"]["pass2_global_bank"] = bank_path
 
-        final_path = run_stage3(cfg, video_path, aligned_path, run_dir, client, tracker, video_tag=video_tag)
-        result["artifacts"]["stage3_final"] = final_path
+        final_path = run_pass3(cfg, video_path, aligned_path, run_dir, client, tracker, video_tag=video_tag)
+        result["artifacts"]["pass3_final"] = final_path
 
         this_run["status"] = "completed"
         result["status"] = "completed"

@@ -24,12 +24,20 @@ class PipelineConfig:
     llm_max_tokens: int = 16384
     prev_event_overlap_count: int = 0
 
-    stage2_temperature: float = 0.1
-    stage2_max_tokens: int = 16384
-    stage2_confidence_threshold: int = 80
+    pass2_temperature: float = 0.1
+    pass2_max_tokens: int = 16384
+    pass2_confidence_threshold: int = 80
+    pass2_hard_split_threshold: int = 50
 
-    stage3_temperature: float = 0.3
-    stage3_max_tokens: int = 16384
+    pass2_review_enable: bool = True
+    pass2_review_frame_max_width: int = 0
+    pass2_review_jpg_quality: int = 92
+    pass2_review_max_frames_per_cluster: int = 3
+    pass2_review_temperature: float = 0.1
+    pass2_review_max_tokens: int = 8192
+
+    pass3_temperature: float = 0.3
+    pass3_max_tokens: int = 16384
 
     max_workers: int = 2
     video_extensions: List[str] = field(

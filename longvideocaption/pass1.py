@@ -11,12 +11,12 @@ from .frame_extractor import (
     get_video_duration,
 )
 from .llm_client import request_llm_with_retry
-from .prompts.stage1_v3 import build_sys_prompt, build_usr_prompt
+from .prompts.pass1_v3 import build_sys_prompt, build_usr_prompt
 from .token_tracker import TokenTracker
 from .utils import format_timestamp, format_timestamp_sec, parse_timestamp_to_seconds, sanitize_filename
 
 
-STAGE_NAME = "stage1_perception"
+PASS_NAME = "pass1_perception"
 
 _log_context = threading.local()
 
@@ -43,7 +43,7 @@ def _save_chunk_prompt(
     previous_context: str,
     timestamps_str_list: list,
 ) -> None:
-    prompts_dir = os.path.join(run_dir, "_stage1_prompts")
+    prompts_dir = os.path.join(run_dir, "_pass1_prompts")
     os.makedirs(prompts_dir, exist_ok=True)
     safe_chunk = sanitize_filename(chunk_name.replace(" ", "")).strip("[]")
     path = os.path.join(prompts_dir, f"chunk_{chunk_idx:03d}_{safe_chunk}.json")
@@ -337,7 +337,7 @@ def _resume_from_progress(
     return last_end_sec, last_end_str, last_action, False, []
 
 
-def run_stage1(
+def run_pass1(
     cfg: PipelineConfig,
     video_path: str,
     run_dir: str,
@@ -346,10 +346,10 @@ def run_stage1(
     video_tag: str = "",
 ) -> str:
     os.makedirs(run_dir, exist_ok=True)
-    pass1_output_path = os.path.join(run_dir, "stage1_progress.json")
+    pass1_output_path = os.path.join(run_dir, "pass1_progress.json")
     temp_dir = os.path.join(run_dir, "_tmp")
 
-    _log_context.log_file = os.path.join(run_dir, "stage1.log")
+    _log_context.log_file = os.path.join(run_dir, "pass1.log")
 
     total_duration = float(int(get_video_duration(video_path)))
 
@@ -463,7 +463,7 @@ def run_stage1(
                 messages=[{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_content}],
                 max_tokens=cfg.llm_max_tokens, temperature=cfg.llm_temperature,
                 max_retries=cfg.max_retries, chunk_name=log_tag,
-                token_tracker=token_tracker, stage=STAGE_NAME,
+                token_tracker=token_tracker, stage=PASS_NAME,
             )
 
             _validate_and_snap_event_times(
@@ -525,7 +525,7 @@ def run_stage1(
             _log(video_tag, f"❌ [严重跳过] Chunk {chunk_name} 多次尝试均失败: {e}")
 
         if chunk_end >= total_duration - 0.01:
-            _log(video_tag, f"🏁 已处理到视频末尾 ({format_timestamp(total_duration)})，Stage 1 结束。")
+            _log(video_tag, f"🏁 已处理到视频末尾 ({format_timestamp(total_duration)})，Pass 1 结束。")
             break
 
         chunk_start = next_start

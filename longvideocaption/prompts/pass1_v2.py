@@ -1,4 +1,4 @@
-"""Stage 1 prompt — v2 (anti-hallucination reinforcement).
+"""Pass 1 prompt — v2 (anti-hallucination reinforcement).
 
 相对 v1 的改动：
 - 新增【🔵 抗幻觉铁律】专区，硬约束多帧一致性、不可辨识声明、禁编非视觉信息。
