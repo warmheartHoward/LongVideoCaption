@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+import re
 import time
 from datetime import datetime
 from typing import Dict, List, Tuple
@@ -8,7 +9,7 @@ from typing import Dict, List, Tuple
 from .config import PipelineConfig
 from .frame_extractor import extract_single_frame_base64
 from .token_tracker import TokenTracker
-from .utils import clean_json_response, safe_replace
+from .utils import clean_json_response
 
 
 PASS_NAME = "pass2_alignment"
@@ -23,35 +24,31 @@ def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-SYS_PROMPT_ALIGNMENT = """你是一个顶级的电影多模态视觉统筹。
-当前视频正在分段处理，同一个角色可能会被赋予不同的【临时名称】。
-你的任务是：接收【已确立的全局聚类库】与【当前片段的新角色图片】，进行严谨的身份同一性判决。
-（⚠️ 本阶段只做**身份是否相同**的判决。最终的权威命名会在所有 chunk 处理完后由终审环节统一决定，此处不要纠结名字，只要判同一性）
+SYS_PROMPT_ALIGNMENT = """你是电影多模态视觉统筹。视频被切成多个 chunk 处理，同一角色在不同 chunk 中可能被赋予不同的临时名。请判定当前片段里出现的候选角色是否等同于【全局聚类库】中某个已有角色。本阶段只判"身份是否相同"，不命名（权威命名在后续终审环节）。
 
-【⚠️ 严禁发生的错误（Anti-Patterns）】
-1. 严禁"望文生义"：绝对不要因为临时名字里都有"公主"或"勇士"就判定为同一人。必须 100% 依赖图像特征！
-2. 警惕"同类不同体"：如果两只猫的颜色、眼睛形状有显著差异，即使都是猫，也必须判定为 NEW。
-3. 宁缺毋滥原则：当且仅当你对两者的视觉特征有 80% 以上的把握吻合时，才进行合并。如果有严重疑虑，坚决判定为 NEW。
+【综合四类证据做判断】
+1. 视觉：对比候选帧与聚类库参考帧的核心不变特征（面部、体型、服饰、物种、标志性外观）。镜头角度、距离、光照、姿态变化属正常差异，聚焦不变特征。
+2. 历史临时名：聚类库展示了该角色在过去 chunk 里被叫过的所有临时名（去重列表）。候选的临时名若出现在该列表里，是支持合并的较强线索；但仅靠名字重合不足以合并，需视觉/描述/剧情至少再有一项支持。
+3. 外貌描述：候选的描述与库中各 chunk 描述是否吻合。明显矛盾（物种、颜色、显著体征不同）→ 支持 NEW。
+4. 剧情上下文：结合前情提要与当前片段剧情，该候选的出场是否与某 cluster 的剧情自然衔接。
 
-【💡 优秀推理范例学习】
-假设聚类库里有 cluster_0003（参考名：皮皮，特征：黑色圆润，巨大空洞眼）。当前片段出现 [大眼鼠勇士]（特征：身披铠甲，巨大空洞眼）。
-✅ 正确的 step3_comparison_logic："虽然穿了铠甲且被称为鼠，但其核心面部特征（占据半脸的巨大空洞眼）与聚类 cluster_0003 完全一致。结合剧情，判定为同一聚类。"
+【判定结果】
+- 多类证据支持合并 → 填 cluster_id，confidence 视证据强度给 60-95
+- 视觉/描述/剧情都无决定性证据，或视觉明显冲突 → NEW
 
 请严格输出 JSON：
 {
   "multimodal_reasoning_process": [
     {
       "temp_name": "<当前评估的临时角色>",
-      "step1_bank_visual_features": "<它最像聚类库里哪个 cluster？详细列出那个 cluster 的核心视觉特征。若完全不像任何人，填无>",
-      "step2_current_visual_features": "<仔细观察当前角色的截图，列出其客观视觉特征>",
-      "step3_comparison_logic": "<对比 step1 和 step2，结合动作逻辑，给出判定理由>"
+      "comparison": "<对比了聚类库里哪个 cluster、用了哪些证据（视觉/名字/描述/剧情）、结论>"
     }
   ],
   "chunk_identity_mapping": [
     {
       "temp_name_in_chunk": "<当前片段中的临时名称>",
-      "match_result": "<若匹配到已有聚类，填其 cluster_id（例如 cluster_0003）；若是新角色，填 NEW>",
-      "confidence_score": <0-100的整数，表示你对这次判定的视觉把握有多大>
+      "match_result": "<匹配则填 cluster_id（例如 cluster_0003）；新角色填 NEW>",
+      "confidence_score": <0-100 的整数>
     }
   ]
 }"""
@@ -189,13 +186,29 @@ def _phase_a_rolling(cfg, video_path, pass1_results, global_bank, chunk_mappings
         data = chunk.get("data", {})
 
         current_story = data.get("chunk_summary", "")
-        current_chars = (
+        raw_chars = (
             data.get("characters_in_chunk")
             or data.get("new_characters_in_chunk")
             or []
         )
 
-        _log(video_tag, f"\n🔍 [Phase A] 分析 {chunk_range} | 发现待定面孔: {len(current_chars)} 个")
+        seen_norm: set = set()
+        current_chars: list = []
+        dup_dropped = 0
+        for c in raw_chars:
+            norm = _normalize_name(c.get("temp_name", ""))
+            if not norm:
+                continue
+            if norm in seen_norm:
+                dup_dropped += 1
+                continue
+            seen_norm.add(norm)
+            current_chars.append(c)
+
+        if dup_dropped > 0:
+            _log(video_tag, f"  🧹 [去重] 合并同名 temp_name 条目 {dup_dropped} 个（同 chunk 内视为同一角色）")
+
+        _log(video_tag, f"\n🔍 [Phase A] 分析 {chunk_range} | 发现待定面孔: {len(current_chars)} 个（原始 {len(raw_chars)} 条）")
 
         chunk_map: Dict[str, str] = {}
 
@@ -218,11 +231,33 @@ def _phase_a_rolling(cfg, video_path, pass1_results, global_bank, chunk_mappings
             user_content.append({"type": "text", "text": "====================\n【已确立的全局聚类库】 (老熟人列表):"})
             for g in global_bank:
                 cid = g["cluster_id"]
-                ref = g["sightings"][0]
+                sightings = g.get("sightings", [])
+
+                seen_norm: set = set()
+                name_history: List[str] = []
+                for s in sightings:
+                    tn = s.get("temp_name", "")
+                    norm = _normalize_name(tn)
+                    if not norm or norm in seen_norm:
+                        continue
+                    seen_norm.add(norm)
+                    name_history.append(tn)
+
+                desc_lines: List[str] = []
+                for s in sightings:
+                    desc = s.get("desc", "")
+                    if not desc:
+                        continue
+                    chunk_i = s.get("chunk_i")
+                    chunk_label = f"第{chunk_i + 1}段" if isinstance(chunk_i, int) else "?"
+                    desc_lines.append(f"  - ({chunk_label}) {desc}")
+                desc_block = "\n".join(desc_lines) if desc_lines else "  (无)"
+
                 user_content.append({"type": "text", "text": (
                     f"cluster_id: {cid}\n"
-                    f"参考临时名: {ref.get('temp_name', '')}\n"
-                    f"参考外貌描述: {ref.get('desc', '')}"
+                    f"出现次数: {len(sightings)}\n"
+                    f"历史临时名（按出现顺序去重）: {name_history}\n"
+                    f"历史外貌描述:\n{desc_block}"
                 )})
                 b64 = cluster_frame_cache.get(cid, "")
                 if b64:
@@ -282,6 +317,7 @@ def _phase_a_rolling(cfg, video_path, pass1_results, global_bank, chunk_mappings
                 if norm_key and norm_key not in norm_char_lookup:
                     norm_char_lookup[norm_key] = c
 
+            processed_temp_norm: set = set()
             for mapping in align_result.get("chunk_identity_mapping", []):
                 temp_name_raw = mapping.get("temp_name_in_chunk")
                 match_result = (mapping.get("match_result") or "").strip()
@@ -290,10 +326,14 @@ def _phase_a_rolling(cfg, video_path, pass1_results, global_bank, chunk_mappings
                 if not temp_name_raw:
                     continue
                 norm_key = _normalize_name(temp_name_raw)
+                if norm_key in processed_temp_norm:
+                    _log(video_tag, f"    ⚠️ 模型对 {temp_name_raw!r} 输出了重复映射，忽略重复项")
+                    continue
                 matched_char = norm_char_lookup.get(norm_key)
                 if not matched_char:
                     _log(video_tag, f"    ⚠️ 模型输出的 temp_name 不在当前片段: {temp_name_raw!r}（归一化后={norm_key!r}），忽略")
                     continue
+                processed_temp_norm.add(norm_key)
 
                 temp_name = matched_char.get("temp_name", "") or temp_name_raw
                 if temp_name_raw != temp_name:
@@ -596,26 +636,32 @@ def _phase_c_rewrite(pass1_results, global_bank, chunk_mappings, final_info, vid
         if not chunk_map:
             continue
 
-        for ev in events:
-            caption = ev.get("step3_synthesized_dense_caption", "")
-            if not caption:
+        pairs: Dict[str, str] = {}
+        for temp_name, cid in chunk_map.items():
+            info = final_info.get(cid)
+            if not info:
                 continue
-            new_caption = caption
-            for temp_name, cid in chunk_map.items():
-                info = final_info.get(cid)
-                if not info:
+            final_name = info.get("final_global_name", "")
+            if not final_name or not temp_name:
+                continue
+            stripped = temp_name.strip()
+            if stripped and not (stripped.startswith("[") and stripped.endswith("]")):
+                pairs.setdefault(f"[{stripped}]", final_name)
+            pairs.setdefault(temp_name, final_name)
+
+        if pairs:
+            sorted_olds = sorted(pairs.keys(), key=len, reverse=True)
+            pattern = re.compile("|".join(re.escape(o) for o in sorted_olds))
+            for ev in events:
+                caption = ev.get("step3_synthesized_dense_caption", "")
+                if not caption:
                     continue
-                final_name = info.get("final_global_name", "")
-                if not final_name or not temp_name:
-                    continue
-                before = new_caption
-                stripped = temp_name.strip()
-                if not (stripped.startswith("[") and stripped.endswith("]")):
-                    new_caption = safe_replace(new_caption, f"[{stripped}]", final_name)
-                new_caption = safe_replace(new_caption, temp_name, final_name)
-                if new_caption != before:
-                    total_replacements += 1
-            ev["step3_synthesized_dense_caption"] = new_caption
+                hits = pattern.findall(caption)
+                if hits:
+                    total_replacements += len(hits)
+                    ev["step3_synthesized_dense_caption"] = pattern.sub(
+                        lambda m: pairs[m.group(0)], caption
+                    )
 
         chars = data.get("characters_in_chunk") or data.get("new_characters_in_chunk") or []
         for c in chars:
