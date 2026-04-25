@@ -8,6 +8,8 @@ from .llm_client import build_client
 from .pass1 import run_pass1
 from .pass2 import run_pass2
 from .pass3 import run_pass3
+from .stage2 import run_stage2
+from .stage3 import run_stage3
 from .token_tracker import TokenTracker
 from .utils import sanitize_filename
 
@@ -84,6 +86,12 @@ def process_single_video(cfg: PipelineConfig, video_path: str, output_root: str)
 
         final_path = run_pass3(cfg, video_path, aligned_path, run_dir, client, tracker, video_tag=video_tag)
         result["artifacts"]["pass3_final"] = final_path
+
+        stage2_path = run_stage2(cfg, video_path, final_path, run_dir, client, tracker, video_tag=video_tag)
+        result["artifacts"]["stage2_refined"] = stage2_path
+
+        stage3_path = run_stage3(cfg, stage2_path, run_dir, client, tracker, video_tag=video_tag)
+        result["artifacts"]["stage3_polished"] = stage3_path
 
         this_run["status"] = "completed"
         result["status"] = "completed"

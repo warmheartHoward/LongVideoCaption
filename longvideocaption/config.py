@@ -40,6 +40,17 @@ class PipelineConfig:
     pass3_temperature: float = 0.3
     pass3_max_tokens: int = 16384
 
+    stage2_fps: float = 1.0
+    stage2_max_frames: int = 100
+    stage2_temperature: float = 0.2
+    stage2_max_tokens: int = 8192
+    stage2_adjust_start_offset: float = 0.5
+    stage2_frame_max_width: int = 960
+    stage2_frame_jpg_quality: int = 90
+
+    stage3_temperature: float = 0.4
+    stage3_max_tokens: int = 16384
+
     max_workers: int = 2
     video_extensions: List[str] = field(
         default_factory=lambda: [".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv"]

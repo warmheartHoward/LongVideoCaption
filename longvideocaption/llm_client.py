@@ -61,3 +61,41 @@ def request_llm_with_retry(
             if attempt == max_retries:
                 raise e
             time.sleep(3 * attempt)
+
+
+def request_llm_text_with_retry(
+    client,
+    model,
+    messages,
+    max_tokens,
+    temperature,
+    max_retries=3,
+    chunk_name="全局",
+    token_tracker=None,
+    stage="unknown",
+):
+    for attempt in range(1, max_retries + 1):
+        try:
+            start_api = time.time()
+            completion = client.chat.completions.create(
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                messages=messages,
+            )
+            api_cost = time.time() - start_api
+            usage = completion.usage
+            if usage:
+                print(f"📊 [Token 统计] Prompt: {usage.prompt_tokens} | Total: {usage.total_tokens}")
+                if token_tracker is not None:
+                    token_tracker.record(stage, usage)
+
+            raw_response_text = completion.choices[0].message.content or ""
+            print(f"✅ [{chunk_name}] 调用成功 (耗时: {api_cost:.2f}秒)")
+            return raw_response_text.strip()
+
+        except Exception as e:
+            print(f"⚠️ [{chunk_name}] API 请求异常 (尝试 {attempt}/{max_retries}): {str(e)}")
+            if attempt == max_retries:
+                raise e
+            time.sleep(3 * attempt)

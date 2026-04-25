@@ -134,6 +134,30 @@ def get_raw_chunk_video_base64(
     return valid_timestamps, video_b64
 
 
+def get_event_frames_base64(
+    video_path: str,
+    start_sec: float,
+    end_sec: float,
+    fps: float,
+    max_frames: int,
+    max_width: int,
+    jpg_quality: int,
+) -> Tuple[List[float], List[str]]:
+    if end_sec <= start_sec:
+        return [], []
+
+    duration = end_sec - start_sec
+    n_by_fps = max(1, int(round(duration * max(fps, 1e-6))))
+    n_frames = min(n_by_fps, max(1, max_frames))
+
+    if n_frames == 1:
+        timestamps = [start_sec + duration / 2.0]
+    else:
+        timestamps = np.linspace(start_sec, end_sec, n_frames + 2)[1:-1].tolist()
+
+    return get_base64_frames(video_path, timestamps, max_width, jpg_quality)
+
+
 def extract_single_frame_base64(video_path: str, timestamp_str: str, max_width=960, jpg_quality: int = 90) -> str:
     if not isinstance(timestamp_str, str):
         return ""
