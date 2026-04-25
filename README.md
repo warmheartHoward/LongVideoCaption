@@ -9,46 +9,46 @@
 
 ```mermaid
 flowchart TB
-    CLI[CLI main.py<br/>--input / --output / --workers] --> Runner
+    CLI["CLI main.py<br/>--input、--output、--workers"] --> Runner
 
     subgraph Runner["runner.run_batch"]
-        Disc[discover_videos<br/>递归扫描 + mtime 排序]
-        Pool{ThreadPoolExecutor<br/>max_workers 并发}
+        Disc["discover_videos<br/>递归扫描 + mtime 排序"]
+        Pool{"ThreadPoolExecutor<br/>max_workers 并发"}
         Disc --> Pool
     end
 
-    Pool -.->|每视频一个 worker 线程| Pipe1[process_single_video]
-    Pool -.->|...| PipeN[process_single_video]
+    Pool -.->|"每视频一个 worker 线程"| Pipe1["process_single_video"]
+    Pool -.->|"..."| PipeN["process_single_video"]
 
-    subgraph PerVideo["单视频流水线 (pipeline.py)"]
+    subgraph PerVideo["单视频流水线 pipeline.py"]
         direction TB
-        P1[Pass 1<br/>视觉感知]
-        P2[Pass 2<br/>身份对齐]
-        P3[Pass 3<br/>章节聚合]
-        S2[Stage 2<br/>帧级精修]
-        S3[Stage 3<br/>全局润色]
+        P1["Pass 1<br/>视觉感知"]
+        P2["Pass 2<br/>身份对齐"]
+        P3["Pass 3<br/>章节聚合"]
+        S2["Stage 2<br/>帧级精修"]
+        S3["Stage 3<br/>全局润色"]
         P1 --> P2 --> P3 --> S2 --> S3
     end
 
     Pipe1 --> PerVideo
 
-    subgraph Artifacts["磁盘产物 ({output}/{video}/{hyper_sig}/)"]
-        F1[pass1_progress.json]
-        F2[pass2_progress.json<br/>pass2_review_log.json]
-        F3[pass2_aligned.json<br/>pass2_global_bank.json]
-        F4[pass3_final.json]
-        F5[stage2_refined.json]
-        F6[★ stage3_polished.json]
+    subgraph Artifacts["磁盘产物 output/video/hyper_sig"]
+        F1["pass1_progress.json"]
+        F2["pass2_progress.json<br/>pass2_review_log.json"]
+        F3["pass2_aligned.json<br/>pass2_global_bank.json"]
+        F4["pass3_final.json"]
+        F5["stage2_refined.json"]
+        F6["★ stage3_polished.json"]
     end
 
-    P1 -.->|chunk 级增量写| F1
-    P2 -.->|Phase A/B 增量写| F2
-    P2 -.->|Phase C 终产物| F3
-    P3 -.->|单次调用| F4
-    S2 -.->|per-event 增量写| F5
-    S3 -.->|单次调用| F6
+    P1 -.->|"chunk 级增量写"| F1
+    P2 -.->|"Phase A、B 增量写"| F2
+    P2 -.->|"Phase C 终产物"| F3
+    P3 -.->|"单次调用"| F4
+    S2 -.->|"per-event 增量写"| F5
+    S3 -.->|"单次调用"| F6
 
-    PerVideo --> Agg[聚合: _aggregate_token_usage.json<br/>_run_summary.json]
+    PerVideo --> Agg["聚合<br/>_aggregate_token_usage.json<br/>_run_summary.json"]
 ```
 
 > ★ `stage3_polished.json` 是最终交付产物；`pass3_final.json` 是不带 frame-level 精修的中间稳定版本（也可单独消费）。
@@ -61,21 +61,21 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    Init([chunk_start = 0]) --> Cond{chunk_start <<br/>video_duration?}
+    Init(["chunk_start = 0"]) --> Cond{"chunk_start 小于 video_duration?"}
 
-    Cond -->|yes| Extract
-    Extract[抽帧:<br/>scenedetect + get_base64_frames<br/>或 video_base64 整段]
-    Extract --> Build[拼 prompt:<br/>sys + 前情提要 + 角色滚动史<br/>+ 帧序列]
-    Build --> LLM[LLM 多模态调用<br/>JSON 严格输出]
-    LLM --> Parse[解析 events / chunk_summary<br/>/ characters_in_chunk]
-    Parse --> Revise[prev_event_revision:<br/>跨 chunk 截断动作合并]
-    Revise --> Relay{动态接力:<br/>5 ≤ last_end_sec ≤ chunk_end+10?}
-    Relay -->|yes| NextEnd[chunk_start = last_end]
-    Relay -->|no| Overlap[chunk_start = chunk_end - 20%重叠]
-    NextEnd & Overlap --> Append[追加到 pass1_progress.json]
+    Cond -->|"yes"| Extract["抽帧<br/>scenedetect + get_base64_frames<br/>或 video_base64 整段"]
+    Extract --> Build["拼 prompt<br/>sys + 前情提要 + 角色滚动史 + 帧序列"]
+    Build --> LLM["LLM 多模态调用<br/>JSON 严格输出"]
+    LLM --> Parse["解析 events、chunk_summary、characters_in_chunk"]
+    Parse --> Revise["prev_event_revision<br/>跨 chunk 截断动作合并"]
+    Revise --> Relay{"动态接力<br/>5 ≤ last_end_sec ≤ chunk_end+10 ?"}
+    Relay -->|"yes"| NextEnd["chunk_start = last_end"]
+    Relay -->|"no"| Overlap["chunk_start = chunk_end - 20%重叠"]
+    NextEnd --> Append["追加到 pass1_progress.json"]
+    Overlap --> Append
     Append --> Cond
 
-    Cond -->|done| Out([pass1_progress.json:<br/>chunk[]/data/events[]])
+    Cond -->|"done"| Out(["pass1_progress.json<br/>chunks 数组、每个含 data.events 列表"])
 ```
 
 **关键不变量**：events **首尾相连**逐字相等（`events[i+1].start_time == events[i].end_time`），由 prompt 强制约束。
@@ -86,30 +86,31 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    Read[读 pass1_progress.json] --> PA
+    Read["读 pass1_progress.json"] --> PA
 
-    subgraph PhaseA["Phase A · 滚动聚类（per-chunk 断点）"]
-        PA[chunk 内的临时角色] --> Compare[与已有 cluster 多模态对比<br/>多 sighting 高清帧]
-        Compare --> Conf{confidence ≥<br/>pass2_confidence_threshold?}
-        Conf -->|是| Merge[加入已有 cluster]
-        Conf -->|否| New[新建 cluster]
-        Merge & New --> WriteA[pass2_progress.json<br/>+ pass2_bank_progress.json]
+    subgraph PhaseA["Phase A · 滚动聚类 per-chunk 断点"]
+        PA["chunk 内的临时角色"] --> Compare["与已有 cluster 多模态对比<br/>多 sighting 高清帧"]
+        Compare --> Conf{"confidence ≥ pass2_confidence_threshold ?"}
+        Conf -->|"是"| Merge["加入已有 cluster"]
+        Conf -->|"否"| New["新建 cluster"]
+        Merge --> WriteA["pass2_progress.json<br/>pass2_bank_progress.json"]
+        New --> WriteA
     end
 
     WriteA --> PB
 
-    subgraph PhaseB["Phase B · 终审（high-res review）"]
-        PB[对每个 cluster<br/>收集多个 sighting] --> HiRes[高清帧 + 临时名候选]
-        HiRes --> Review[LLM 批量复核<br/>final_global_name + refined_desc]
-        Review --> Preserve[逐 temp_name 决定<br/>preserve_temp_names<br/>强默认全替换]
-        Preserve --> WriteB[pass2_review_log.json]
+    subgraph PhaseB["Phase B · 终审 high-res review"]
+        PB["对每个 cluster<br/>收集多个 sighting"] --> HiRes["高清帧 + 临时名候选"]
+        HiRes --> Review["LLM 批量复核<br/>final_global_name + refined_desc"]
+        Review --> Preserve["逐 temp_name 决定<br/>preserve_temp_names<br/>强默认全替换"]
+        Preserve --> WriteB["pass2_review_log.json"]
     end
 
     WriteB --> PC
 
     subgraph PhaseC["Phase C · 批量 caption 改写"]
-        PC[遍历每个 chunk 的 events] --> Regex[长度优先正则替换<br/>跳过 preserve_temp_names]
-        Regex --> WriteC[pass2_aligned.json<br/>+ pass2_global_bank.json lite]
+        PC["遍历每个 chunk 的 events"] --> Regex["长度优先正则替换<br/>跳过 preserve_temp_names"]
+        Regex --> WriteC["pass2_aligned.json<br/>pass2_global_bank.json lite"]
     end
 ```
 
@@ -148,28 +149,27 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    Start[读 pass3_final.json] --> Exists{stage2_refined.json<br/>存在?}
-    Exists -->|是| Resume[载入状态<br/>跳过已有 frame_caption 的 event]
-    Exists -->|否| Clone[克隆结构<br/>每个 event 加 frame_caption=空]
+    Start["读 pass3_final.json"] --> Exists{"stage2_refined.json 存在 ?"}
+    Exists -->|"是"| Resume["载入状态<br/>跳过已有 frame_caption 的 event"]
+    Exists -->|"否"| Clone["克隆结构<br/>每个 event 加 frame_caption 空"]
 
-    Resume & Clone --> Loop{遍历 event}
-    Loop -->|chapter 切换| Reset[previous_caption = 空]
-    Reset --> ExtFrames
+    Resume --> Loop{"遍历 event"}
+    Clone --> Loop
+    Loop -->|"chapter 切换"| Reset["previous_caption 置空"]
+    Reset --> ExtFrames["get_event_frames_base64<br/>区间内按 stage2_fps 抽帧"]
     Loop --> ExtFrames
 
-    ExtFrames[get_event_frames_base64<br/>区间内按 stage2_fps 抽帧]
-    ExtFrames --> AdjStart{abs start - prev.end < 0.01s?}
-    AdjStart -->|是| Shift[+stage2_adjust_start_offset<br/>避免抽到重复帧]
-    AdjStart -->|否| BuildMsg
+    ExtFrames --> AdjStart{"abs start - prev.end 小于 0.01s ?"}
+    AdjStart -->|"是"| Shift["start += stage2_adjust_start_offset<br/>避免抽到重复帧"]
+    AdjStart -->|"否"| BuildMsg["messages = sys + user_text<br/>+ N 张 image_url 带秒数"]
     Shift --> BuildMsg
 
-    BuildMsg[messages = sys + user_text<br/>+ N 张 image_url 带秒数]
-    BuildMsg --> CallVL[request_llm_text_with_retry<br/>纯文本输出]
-    CallVL --> Update[ev.frame_caption = result<br/>previous_caption = result]
-    Update --> Persist[整体落盘<br/>stage2_refined.json]
+    BuildMsg --> CallVL["request_llm_text_with_retry<br/>纯文本输出"]
+    CallVL --> Update["ev.frame_caption = result<br/>previous_caption = result"]
+    Update --> Persist["整体落盘<br/>stage2_refined.json"]
     Persist --> Loop
 
-    Loop -->|done| End([stage2_refined.json:<br/>每 event 多 frame_caption + frame_timestamps])
+    Loop -->|"done"| End(["stage2_refined.json<br/>每 event 多 frame_caption 与 frame_timestamps"])
 ```
 
 **关键约束**：
