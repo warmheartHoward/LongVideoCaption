@@ -35,6 +35,7 @@ class PipelineConfig:
     pass2_review_max_frames_per_cluster: int = 3
     pass2_review_temperature: float = 0.1
     pass2_review_max_tokens: int = 8192
+    pass2_review_batch_size: int = 0  # 0 或负数 = 一次性全部；>0 = 每批最多 N 个聚类
 
     pass3_temperature: float = 0.3
     pass3_max_tokens: int = 16384

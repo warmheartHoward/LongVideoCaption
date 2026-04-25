@@ -54,26 +54,29 @@ SYS_PROMPT_ALIGNMENT = """你是电影多模态视觉统筹。视频被切成多
 }"""
 
 
-SYS_PROMPT_REVIEW = """你是终审级电影多模态视觉统筹。系统已通过滚动匹配完成初步的角色聚类，现在你收到其中**一个聚类**的全部证据（高清视觉帧 + 该角色在各 chunk 里被赋予的临时名称 + 每次出现时的外貌描述）。
+SYS_PROMPT_REVIEW = """你是终审级电影多模态视觉统筹。系统已通过滚动匹配完成初步的角色聚类，现在你收到**全部待终审聚类**的证据（高清视觉帧 + 各角色在不同 chunk 里被赋予的临时名称 + 每次出现时的外貌描述）。请在一次回复中为**每一个**聚类完成下面三件事。
 
-你要做三件事：
 1. 【权威命名】综合所有证据，为该聚类确定一个**权威全局标准名**。命名权威度排序：
    - 对白/字幕点名的专名（如"周太安"） > 有辨识度的绰号 > 描述性命名（如"红衣男子"） > 泛化编号（"男人1"）
    - 候选名里都不够权威，可基于视觉特征自拟更准确的名字
    - 输出格式：方括号包裹，例如 [周太安]
-2. 【描述重写】基于**高清帧**重写该角色的客观视觉描述。滚动阶段使用的是较低分辨率的帧，可能有错误，以高清帧为准。
-3. 【拆分判断】判断这个聚类是否应该被**拆分** —— 即滚动阶段是否把多个不同角色误合并了。高清帧下若发现明显是不同的人，给出拆分建议；不确定就不拆。
+2. 【描述重写】基于**高清帧**重写该角色的客观视觉描述。滚动阶段使用较低分辨率的帧，可能有错误，以高清帧为准。
+3. 【拆分判断】判断该聚类是否应被**拆分** —— 即滚动阶段是否把多个不同角色误合并。高清帧下若发现明显是不同的人，给出拆分建议；不确定就不拆。
 
-请严格输出 JSON：
+请严格输出 JSON，`reviews` 数组必须**覆盖全部传入的聚类**，每个聚类一项：
 {
-  "cluster_id": "<传入的 cluster_id 原样返回>",
-  "final_global_name": "[xxx]",
-  "refined_visual_description": "基于高清帧重写的客观外貌描述",
-  "chosen_reason": "选择该名字的理由（源自哪个 sighting 的 temp_name / 为什么权威）",
-  "split_suggestion": null
+  "reviews": [
+    {
+      "cluster_id": "<传入的 cluster_id 原样返回>",
+      "final_global_name": "[xxx]",
+      "refined_visual_description": "基于高清帧重写的客观外貌描述",
+      "chosen_reason": "选择该名字的理由（源自哪个 sighting 的 temp_name / 为什么权威）",
+      "split_suggestion": null
+    }
+  ]
 }
 
-若需要拆分，将 split_suggestion 填为数组：
+若某聚类需要拆分，将该项的 split_suggestion 填为数组：
 [
   {
     "sub_cluster_label": "sub_A",
@@ -81,10 +84,9 @@ SYS_PROMPT_REVIEW = """你是终审级电影多模态视觉统筹。系统已通
     "inferred_name": "[aaa]",
     "inferred_description": "...",
     "reason": "为什么认为这些 sighting 和其他的不是同一人"
-  },
-  ...
+  }
 ]
-拆分时 sighting_indices 必须**覆盖全部** sightings 且互不重叠（总数 = 传入的 sighting 数）。"""
+拆分时 sighting_indices 必须**覆盖该聚类全部** sightings 且互不重叠（总数 = 该聚类的 sighting 数）。"""
 
 
 # =========================
@@ -415,53 +417,75 @@ def _phase_b_review(cfg, video_path, global_bank, review_log,
                 "chosen_reason": entry.get("chosen_reason", ""),
             }
 
-    idx = 0
-    while idx < len(global_bank):
-        cluster = global_bank[idx]
-        cid = cluster["cluster_id"]
-        idx += 1
+    pending = [
+        c for c in global_bank
+        if c["cluster_id"] not in reviewed_cluster_ids and c.get("sightings")
+    ]
+    skipped_empty = [
+        c["cluster_id"] for c in global_bank
+        if c["cluster_id"] not in reviewed_cluster_ids and not c.get("sightings")
+    ]
+    for cid in skipped_empty:
+        _log(video_tag, f"  ⚠️ [Phase B] {cid} 无 sightings，跳过")
+        reviewed_cluster_ids.add(cid)
 
-        if cid in reviewed_cluster_ids:
-            continue
+    if not pending:
+        _log(video_tag, "  ⏭️ [Phase B] 无待复核聚类")
+        return final_info
 
-        sightings = cluster.get("sightings", [])
-        if not sightings:
-            _log(video_tag, f"  ⚠️ [Phase B] {cid} 无 sightings，跳过")
-            reviewed_cluster_ids.add(cid)
-            continue
+    batch_size = cfg.pass2_review_batch_size
+    if batch_size and batch_size > 0:
+        batches = [pending[i:i + batch_size] for i in range(0, len(pending), batch_size)]
+        size_label = str(batch_size)
+    else:
+        batches = [pending]
+        size_label = "ALL"
 
-        sel_indices = _select_review_sighting_indices(len(sightings), cfg.pass2_review_max_frames_per_cluster)
-        _log(video_tag, f"\n🔎 [Phase B] 终审 {cid} | sightings={len(sightings)} | 高清帧采样索引={sel_indices}")
+    _log(video_tag, f"\n🔎 [Phase B] 终审 {len(pending)} 个聚类，分 {len(batches)} 批 (batch_size={size_label})")
 
-        temp_name_list = [s.get("temp_name", "") for s in sightings]
+    for batch_idx, batch in enumerate(batches, 1):
+        _log(video_tag, f"\n  ── 批次 {batch_idx}/{len(batches)} | 本批 {len(batch)} 个聚类 ──")
+
         user_content: List[dict] = [
-            {"type": "text", "text": f"cluster_id: {cid}"},
-            {"type": "text", "text": f"该聚类共 {len(sightings)} 次出现。临时名列表（按出现顺序）: {temp_name_list}"},
+            {"type": "text", "text": (
+                f"以下是 {len(batch)} 个待终审聚类的全部证据。请按 system 指令在一次回复中为每个聚类输出一项。"
+            )}
         ]
+        for cluster in batch:
+            cid = cluster["cluster_id"]
+            sightings = cluster["sightings"]
+            sel_indices = _select_review_sighting_indices(len(sightings), cfg.pass2_review_max_frames_per_cluster)
+            temp_name_list = [s.get("temp_name", "") for s in sightings]
+            _log(video_tag, f"  ➕ 装载 {cid} | sightings={len(sightings)} | 高清帧采样索引={sel_indices}")
 
-        for i_s, s in enumerate(sightings):
             user_content.append({"type": "text", "text": (
-                f"--- sighting #{i_s} ---\n"
-                f"所在 chunk 索引: {s.get('chunk_i')}\n"
-                f"临时名: {s.get('temp_name', '')}\n"
-                f"滚动阶段描述: {s.get('desc', '')}\n"
-                f"锚定时间: {s.get('anchor_ts', '')}"
+                f"\n========== {cid} ==========\n"
+                f"该聚类共 {len(sightings)} 次出现。临时名列表（按出现顺序）: {temp_name_list}"
             )})
-            if i_s in sel_indices:
-                b64 = extract_single_frame_base64(
-                    video_path,
-                    s.get("anchor_ts", ""),
-                    max_width=cfg.pass2_review_frame_max_width,
-                    jpg_quality=cfg.pass2_review_jpg_quality,
-                )
-                if b64:
-                    user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-                else:
-                    _log(video_tag, f"    ⚠️ sighting #{i_s} 高清帧提取失败: {s.get('anchor_ts', '')}")
 
-        user_content.append({"type": "text", "text": "请输出 JSON 终审结果。"})
+            for i_s, s in enumerate(sightings):
+                user_content.append({"type": "text", "text": (
+                    f"--- {cid} sighting #{i_s} ---\n"
+                    f"所在 chunk 索引: {s.get('chunk_i')}\n"
+                    f"临时名: {s.get('temp_name', '')}\n"
+                    f"滚动阶段描述: {s.get('desc', '')}\n"
+                    f"锚定时间: {s.get('anchor_ts', '')}"
+                )})
+                if i_s in sel_indices:
+                    b64 = extract_single_frame_base64(
+                        video_path,
+                        s.get("anchor_ts", ""),
+                        max_width=cfg.pass2_review_frame_max_width,
+                        jpg_quality=cfg.pass2_review_jpg_quality,
+                    )
+                    if b64:
+                        user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+                    else:
+                        _log(video_tag, f"    ⚠️ {cid} sighting #{i_s} 高清帧提取失败: {s.get('anchor_ts', '')}")
 
-        review_result = None
+        user_content.append({"type": "text", "text": "请输出 JSON 终审结果，reviews 必须覆盖本批传入的全部聚类。"})
+
+        batch_result = None
         for attempt in range(1, cfg.max_retries + 1):
             try:
                 start_time = time.time()
@@ -478,128 +502,145 @@ def _phase_b_review(cfg, video_path, global_bank, review_log,
                     token_tracker.record(REVIEW_STAGE_NAME, response.usage)
                     _log(video_tag, f"  📊 [Token] Prompt: {response.usage.prompt_tokens} | Total: {response.usage.total_tokens}")
 
-                review_result = json.loads(clean_json_response(response.choices[0].message.content))
-                _log(video_tag, f"  ✅ 终审完成 (耗时: {time.time() - start_time:.2f}s)")
+                batch_result = json.loads(clean_json_response(response.choices[0].message.content))
+                _log(video_tag, f"  ✅ 批次 {batch_idx} 终审完成 (耗时: {time.time() - start_time:.2f}s)")
                 break
             except Exception as e:
                 _log(video_tag, f"  ⚠️ 终审 API 异常 (尝试 {attempt}/{cfg.max_retries}): {e}")
                 if attempt == cfg.max_retries:
-                    _log(video_tag, f"  ❌ {cid} 终审失败，将回退为首个 sighting 的 temp_name 作为全局名")
+                    _log(video_tag, f"  ❌ 批次 {batch_idx} 调用失败，本批聚类将回退到首个 sighting 的 temp_name")
                 time.sleep(2)
 
-        if review_result is None:
-            fallback_name = f"[{sightings[0].get('temp_name', cid)}]"
-            fallback_desc = sightings[0].get("desc", "")
-            final_info[cid] = {
-                "final_global_name": fallback_name,
-                "refined_visual_description": fallback_desc,
-                "chosen_reason": "FALLBACK: 终审调用失败，回退到首个 sighting 的 temp_name",
-            }
-            review_log.append({
+        items_by_cid: Dict[str, dict] = {}
+        if batch_result is not None:
+            items = batch_result.get("reviews") if isinstance(batch_result, dict) else batch_result
+            if isinstance(items, list):
+                for it in items:
+                    if isinstance(it, dict):
+                        cid = it.get("cluster_id")
+                        if cid:
+                            items_by_cid[cid] = it
+
+        for cluster in batch:
+            cid = cluster["cluster_id"]
+            sightings = cluster["sightings"]
+            item = items_by_cid.get(cid)
+
+            if item is None:
+                fallback_name = f"[{sightings[0].get('temp_name', cid)}]"
+                fallback_desc = sightings[0].get("desc", "")
+                final_info[cid] = {
+                    "final_global_name": fallback_name,
+                    "refined_visual_description": fallback_desc,
+                    "chosen_reason": "FALLBACK: 批量终审未返回该聚类",
+                }
+                review_log.append({
+                    "cluster_id": cid,
+                    "final_global_name": fallback_name,
+                    "refined_visual_description": fallback_desc,
+                    "chosen_reason": "FALLBACK: 批量终审未返回该聚类",
+                    "split_suggestion": None,
+                    "reviewed_at": _now_iso(),
+                    "status": "fallback",
+                })
+                reviewed_cluster_ids.add(cid)
+                _log(video_tag, f"  ❌ {cid} 未在批量结果中，fallback 到首个 sighting 名")
+                continue
+
+            final_name = item.get("final_global_name") or f"[{sightings[0].get('temp_name', cid)}]"
+            refined_desc = item.get("refined_visual_description") or sightings[0].get("desc", "")
+            chosen_reason = item.get("chosen_reason", "")
+            split_suggestion = item.get("split_suggestion")
+
+            _log(video_tag, f"  📝 {cid} -> {final_name}")
+            if chosen_reason:
+                _log(video_tag, f"     选名理由: {chosen_reason}")
+
+            entry = {
                 "cluster_id": cid,
-                "final_global_name": fallback_name,
-                "refined_visual_description": fallback_desc,
-                "chosen_reason": "FALLBACK: 终审调用失败",
-                "split_suggestion": None,
+                "final_global_name": final_name,
+                "refined_visual_description": refined_desc,
+                "chosen_reason": chosen_reason,
+                "split_suggestion": split_suggestion,
                 "reviewed_at": _now_iso(),
-                "status": "fallback",
-            })
-            reviewed_cluster_ids.add(cid)
-            _save_review_log(review_log_path, review_log)
-            continue
+                "status": "ok",
+            }
 
-        final_name = review_result.get("final_global_name") or f"[{sightings[0].get('temp_name', cid)}]"
-        refined_desc = review_result.get("refined_visual_description") or sightings[0].get("desc", "")
-        chosen_reason = review_result.get("chosen_reason", "")
-        split_suggestion = review_result.get("split_suggestion")
+            if isinstance(split_suggestion, list) and len(split_suggestion) >= 2:
+                all_idx: List[int] = []
+                for sub in split_suggestion:
+                    all_idx.extend(sub.get("sighting_indices") or [])
+                expected = list(range(len(sightings)))
+                if sorted(all_idx) != expected:
+                    _log(video_tag, f"  ⚠️ {cid} 拆分 indices 不完整或重叠 (got={sorted(all_idx)}, expected={expected})，拆分被拒绝")
+                    entry["status"] = "split_rejected_invalid_indices"
+                    final_info[cid] = {
+                        "final_global_name": final_name,
+                        "refined_visual_description": refined_desc,
+                        "chosen_reason": chosen_reason,
+                    }
+                else:
+                    _log(video_tag, f"  ✂️ 执行拆分: {cid} -> {len(split_suggestion)} 个子聚类")
+                    sub0 = split_suggestion[0]
+                    sub0_indices = sub0.get("sighting_indices") or []
+                    cluster["sightings"] = [sightings[k] for k in sub0_indices]
+                    if sub0_indices:
+                        first_s = sightings[sub0_indices[0]]
+                        sub0_name = sub0.get("inferred_name") or f"[{first_s.get('temp_name', cid)}]"
+                        sub0_desc = sub0.get("inferred_description") or first_s.get("desc", "")
+                    else:
+                        sub0_name = final_name
+                        sub0_desc = refined_desc
+                    final_info[cid] = {
+                        "final_global_name": sub0_name,
+                        "refined_visual_description": sub0_desc,
+                        "chosen_reason": f"SPLIT sub_A (由 {cid} 拆出，原因: {sub0.get('reason', '')})",
+                    }
+                    _log(video_tag, f"    └─ {cid} 保留 sightings={sub0_indices} -> {sub0_name}")
 
-        _log(video_tag, f"  📝 {cid} -> {final_name}")
-        _log(video_tag, f"     选名理由: {chosen_reason}")
+                    for sub in split_suggestion[1:]:
+                        sub_indices = sub.get("sighting_indices") or []
+                        new_cid = _next_cluster_id(global_bank)
+                        if sub_indices:
+                            first_s = sightings[sub_indices[0]]
+                            sub_name = sub.get("inferred_name") or f"[{first_s.get('temp_name', new_cid)}]"
+                            sub_desc = sub.get("inferred_description") or first_s.get("desc", "")
+                        else:
+                            sub_name = f"[{new_cid}]"
+                            sub_desc = ""
+                        new_cluster = {
+                            "cluster_id": new_cid,
+                            "sightings": [sightings[k] for k in sub_indices],
+                        }
+                        global_bank.append(new_cluster)
+                        final_info[new_cid] = {
+                            "final_global_name": sub_name,
+                            "refined_visual_description": sub_desc,
+                            "chosen_reason": f"SPLIT {sub.get('sub_cluster_label', '')} (由 {cid} 拆出，原因: {sub.get('reason', '')})",
+                        }
+                        reviewed_cluster_ids.add(new_cid)
+                        review_log.append({
+                            "cluster_id": new_cid,
+                            "final_global_name": sub_name,
+                            "refined_visual_description": sub_desc,
+                            "chosen_reason": f"SPLIT {sub.get('sub_cluster_label', '')} from {cid}",
+                            "split_suggestion": None,
+                            "reviewed_at": _now_iso(),
+                            "status": "split_child",
+                        })
+                        _log(video_tag, f"    └─ 新增 {new_cid} 接管 sightings={sub_indices} -> {sub_name}")
 
-        entry = {
-            "cluster_id": cid,
-            "final_global_name": final_name,
-            "refined_visual_description": refined_desc,
-            "chosen_reason": chosen_reason,
-            "split_suggestion": split_suggestion,
-            "reviewed_at": _now_iso(),
-            "status": "ok",
-        }
-
-        if isinstance(split_suggestion, list) and len(split_suggestion) >= 2:
-            all_idx: List[int] = []
-            for sub in split_suggestion:
-                all_idx.extend(sub.get("sighting_indices") or [])
-            expected = list(range(len(sightings)))
-            if sorted(all_idx) != expected:
-                _log(video_tag, f"  ⚠️ 拆分 indices 不完整或重叠 (got={sorted(all_idx)}, expected={expected})，拆分被拒绝")
-                entry["status"] = "split_rejected_invalid_indices"
+                    entry["status"] = "split_applied"
+            else:
                 final_info[cid] = {
                     "final_global_name": final_name,
                     "refined_visual_description": refined_desc,
                     "chosen_reason": chosen_reason,
                 }
-            else:
-                _log(video_tag, f"  ✂️ 执行拆分: {cid} -> {len(split_suggestion)} 个子聚类")
-                sub0 = split_suggestion[0]
-                sub0_indices = sub0.get("sighting_indices") or []
-                cluster["sightings"] = [sightings[k] for k in sub0_indices]
-                if sub0_indices:
-                    first_s = sightings[sub0_indices[0]]
-                    sub0_name = sub0.get("inferred_name") or f"[{first_s.get('temp_name', cid)}]"
-                    sub0_desc = sub0.get("inferred_description") or first_s.get("desc", "")
-                else:
-                    sub0_name = final_name
-                    sub0_desc = refined_desc
-                final_info[cid] = {
-                    "final_global_name": sub0_name,
-                    "refined_visual_description": sub0_desc,
-                    "chosen_reason": f"SPLIT sub_A (由 {cid} 拆出，原因: {sub0.get('reason', '')})",
-                }
-                _log(video_tag, f"    └─ {cid} 保留 sightings={sub0_indices} -> {sub0_name}")
 
-                for sub in split_suggestion[1:]:
-                    sub_indices = sub.get("sighting_indices") or []
-                    new_cid = _next_cluster_id(global_bank)
-                    if sub_indices:
-                        first_s = sightings[sub_indices[0]]
-                        sub_name = sub.get("inferred_name") or f"[{first_s.get('temp_name', new_cid)}]"
-                        sub_desc = sub.get("inferred_description") or first_s.get("desc", "")
-                    else:
-                        sub_name = f"[{new_cid}]"
-                        sub_desc = ""
-                    new_cluster = {
-                        "cluster_id": new_cid,
-                        "sightings": [sightings[k] for k in sub_indices],
-                    }
-                    global_bank.append(new_cluster)
-                    final_info[new_cid] = {
-                        "final_global_name": sub_name,
-                        "refined_visual_description": sub_desc,
-                        "chosen_reason": f"SPLIT {sub.get('sub_cluster_label', '')} (由 {cid} 拆出，原因: {sub.get('reason', '')})",
-                    }
-                    reviewed_cluster_ids.add(new_cid)
-                    review_log.append({
-                        "cluster_id": new_cid,
-                        "final_global_name": sub_name,
-                        "refined_visual_description": sub_desc,
-                        "chosen_reason": f"SPLIT {sub.get('sub_cluster_label', '')} from {cid}",
-                        "split_suggestion": None,
-                        "reviewed_at": _now_iso(),
-                        "status": "split_child",
-                    })
-                    _log(video_tag, f"    └─ 新增 {new_cid} 接管 sightings={sub_indices} -> {sub_name}")
+            review_log.append(entry)
+            reviewed_cluster_ids.add(cid)
 
-                entry["status"] = "split_applied"
-        else:
-            final_info[cid] = {
-                "final_global_name": final_name,
-                "refined_visual_description": refined_desc,
-                "chosen_reason": chosen_reason,
-            }
-
-        review_log.append(entry)
-        reviewed_cluster_ids.add(cid)
         _save_review_log(review_log_path, review_log)
 
     return final_info
