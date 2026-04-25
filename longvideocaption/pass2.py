@@ -314,7 +314,10 @@ def _phase_a_rolling(cfg, video_path, pass1_results, global_bank, chunk_mappings
             except Exception as e:
                 _log(video_tag, f"  ⚠️ API 请求异常 (尝试 {attempt}/{cfg.max_retries}): {e}")
                 if attempt == cfg.max_retries:
-                    _log(video_tag, "  ❌ 跳过该 Chunk 对齐。")
+                    if cfg.strict_failure:
+                        _log(video_tag, "  💥 [严格失败] Pass 2 Phase A 多次尝试均失败 → 终止本视频，跳过下游阶段。")
+                        raise
+                    _log(video_tag, "  ❌ 跳过该 Chunk 对齐。（strict_failure=False）")
                 time.sleep(2)
 
         if align_result is not None:
@@ -516,7 +519,10 @@ def _phase_b_review(cfg, video_path, global_bank, review_log,
             except Exception as e:
                 _log(video_tag, f"  ⚠️ 终审 API 异常 (尝试 {attempt}/{cfg.max_retries}): {e}")
                 if attempt == cfg.max_retries:
-                    _log(video_tag, f"  ❌ 批次 {batch_idx} 调用失败，本批聚类将回退到首个 sighting 的 temp_name")
+                    if cfg.strict_failure:
+                        _log(video_tag, f"  💥 [严格失败] Pass 2 Phase B 批次 {batch_idx} 多次尝试均失败 → 终止本视频，跳过下游阶段。")
+                        raise
+                    _log(video_tag, f"  ❌ 批次 {batch_idx} 调用失败，本批聚类将回退到首个 sighting 的 temp_name（strict_failure=False）")
                 time.sleep(2)
 
         items_by_cid: Dict[str, dict] = {}

@@ -538,7 +538,10 @@ def run_pass1(
                 previous_context = f"【系统提示】: 上一片段解析异常，请直接从 {format_timestamp(next_start)} 开始重新捕捉动作。"
 
         except Exception as e:
-            _log(video_tag, f"❌ [严重跳过] Chunk {chunk_name} 多次尝试均失败: {e}")
+            if cfg.strict_failure:
+                _log(video_tag, f"💥 [严格失败] Chunk {chunk_name} 多次尝试均失败: {e} → 终止本视频 Pass 1，跳过下游阶段。")
+                raise
+            _log(video_tag, f"❌ [严重跳过] Chunk {chunk_name} 多次尝试均失败: {e}（strict_failure=False，继续下一段）")
 
         if chunk_end >= total_duration - 0.01:
             _log(video_tag, f"🏁 已处理到视频末尾 ({format_timestamp(total_duration)})，Pass 1 结束。")

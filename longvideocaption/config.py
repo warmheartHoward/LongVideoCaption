@@ -52,6 +52,8 @@ class PipelineConfig:
     stage3_max_tokens: int = 16384
 
     max_workers: int = 2
+
+    strict_failure: bool = True
     video_extensions: List[str] = field(
         default_factory=lambda: [".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv"]
     )

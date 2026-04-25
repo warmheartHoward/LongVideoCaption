@@ -173,7 +173,10 @@ def run_stage2(
                 stage=STAGE_NAME,
             )
         except Exception as e:
-            _log(video_tag, f"  ❌ [{event_id}] Stage 2 调用失败：{e}")
+            if cfg.strict_failure:
+                _log(video_tag, f"  💥 [严格失败] [{event_id}] Stage 2 调用失败：{e} → 终止本视频，跳过 Stage 3。")
+                raise
+            _log(video_tag, f"  ❌ [{event_id}] Stage 2 调用失败：{e}（strict_failure=False，跳过该 event）")
             continue
 
         ev["frame_caption"] = refined_text
