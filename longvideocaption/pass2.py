@@ -54,14 +54,22 @@ SYS_PROMPT_ALIGNMENT = """你是电影多模态视觉统筹。视频被切成多
 }"""
 
 
-SYS_PROMPT_REVIEW = """你是终审级电影多模态视觉统筹。系统已通过滚动匹配完成初步的角色聚类，现在你收到**全部待终审聚类**的证据（高清视觉帧 + 各角色在不同 chunk 里被赋予的临时名称 + 每次出现时的外貌描述）。请在一次回复中为**每一个**聚类完成下面三件事。
+SYS_PROMPT_REVIEW = """你是终审级电影多模态视觉统筹。系统已通过滚动匹配完成初步的角色聚类，现在你收到**全部待终审聚类**的证据（高清视觉帧 + 各角色在不同 chunk 里被赋予的临时名称 + 每次出现时的外貌描述）。请在一次回复中为**每一个**聚类完成下面三件事。**不要做拆分判断**，滚动阶段的聚类结果保持不变。
 
 1. 【权威命名】综合所有证据，为该聚类确定一个**权威全局标准名**。命名权威度排序：
    - 对白/字幕点名的专名（如"周太安"） > 有辨识度的绰号 > 描述性命名（如"红衣男子"） > 泛化编号（"男人1"）
    - 候选名里都不够权威，可基于视觉特征自拟更准确的名字
    - 输出格式：方括号包裹，例如 [周太安]
 2. 【描述重写】基于**高清帧**重写该角色的客观视觉描述。滚动阶段使用较低分辨率的帧，可能有错误，以高清帧为准。
-3. 【拆分判断】判断该聚类是否应被**拆分** —— 即滚动阶段是否把多个不同角色误合并。高清帧下若发现明显是不同的人，给出拆分建议；不确定就不拆。
+3. 【保留名单 preserve_temp_names】**逐 temp_name 决定是否保留原样**。系统提供了该聚类的临时名列表（按出现顺序），请挑出其中**不能**被权威名覆盖的临时名，其余默认替换为权威名。
+   - 默认 []（空列表）：所有临时名都可安全替换为权威名（消除别名漂移）。
+   - 列入 preserve_temp_names 的典型情形：该临时名承载了**重要的状态/形态/阶段信息**，权威名替换会让 caption 失真。常见模式：
+     * 形态切换：临时名捕捉了当前的存在状态（不同状态的临时名分别保留各自形象信息）。
+     * 装扮 / 重伤 / 化身 / 变形 / 年龄跨度极大：临时名描述的是当下视觉特征，权威名抹平后失去剧情信息。
+     * 临时名本身参与叙事：如"蒙面人"在揭面前后分别出现，统一抹平会丢失"揭面"这一节点的语义。
+   - 列入的临时名必须**逐字**来自系统给出的临时名列表（不要自创、不要带方括号变体——原样照写）。
+   - 同一聚类中其他临时名仍会被替换为权威名；只有列入此名单的字符串保留原样。
+   - 若聚类下**全部**临时名都不该被替换，则把全部临时名都列入。
 
 请严格输出 JSON，`reviews` 数组必须**覆盖全部传入的聚类**，每个聚类一项：
 {
@@ -71,22 +79,11 @@ SYS_PROMPT_REVIEW = """你是终审级电影多模态视觉统筹。系统已通
       "final_global_name": "[xxx]",
       "refined_visual_description": "基于高清帧重写的客观外貌描述",
       "chosen_reason": "选择该名字的理由（源自哪个 sighting 的 temp_name / 为什么权威）",
-      "split_suggestion": null
+      "preserve_temp_names": [],
+      "preserve_reason": "若 preserve_temp_names 非空，必须解释每个被保留的临时名为何不能用权威名覆盖；为空则填空字符串"
     }
   ]
-}
-
-若某聚类需要拆分，将该项的 split_suggestion 填为数组：
-[
-  {
-    "sub_cluster_label": "sub_A",
-    "sighting_indices": [0, 2, 4],
-    "inferred_name": "[aaa]",
-    "inferred_description": "...",
-    "reason": "为什么认为这些 sighting 和其他的不是同一人"
-  }
-]
-拆分时 sighting_indices 必须**覆盖该聚类全部** sightings 且互不重叠（总数 = 该聚类的 sighting 数）。"""
+}"""
 
 
 # =========================
@@ -415,6 +412,8 @@ def _phase_b_review(cfg, video_path, global_bank, review_log,
                 "final_global_name": entry.get("final_global_name", ""),
                 "refined_visual_description": entry.get("refined_visual_description", ""),
                 "chosen_reason": entry.get("chosen_reason", ""),
+                "preserve_temp_names": entry.get("preserve_temp_names", []) or [],
+                "preserve_reason": entry.get("preserve_reason", ""),
             }
 
     pending = [
@@ -526,119 +525,96 @@ def _phase_b_review(cfg, video_path, global_bank, review_log,
             sightings = cluster["sightings"]
             item = items_by_cid.get(cid)
 
+            cluster_temp_names = [s.get("temp_name", "") for s in sightings]
+            cluster_temp_norm_to_raw: Dict[str, str] = {}
+            for tn in cluster_temp_names:
+                norm = _normalize_name(tn)
+                if norm and norm not in cluster_temp_norm_to_raw:
+                    cluster_temp_norm_to_raw[norm] = tn
+
             if item is None:
                 fallback_name = f"[{sightings[0].get('temp_name', cid)}]"
                 fallback_desc = sightings[0].get("desc", "")
+                fallback_preserve = list(dict.fromkeys(cluster_temp_names))
                 final_info[cid] = {
                     "final_global_name": fallback_name,
                     "refined_visual_description": fallback_desc,
                     "chosen_reason": "FALLBACK: 批量终审未返回该聚类",
+                    "preserve_temp_names": fallback_preserve,
+                    "preserve_reason": "FALLBACK 状态下保留全部临时名，避免误改",
                 }
                 review_log.append({
                     "cluster_id": cid,
                     "final_global_name": fallback_name,
                     "refined_visual_description": fallback_desc,
                     "chosen_reason": "FALLBACK: 批量终审未返回该聚类",
-                    "split_suggestion": None,
+                    "preserve_temp_names": fallback_preserve,
+                    "preserve_reason": "FALLBACK 状态下保留全部临时名，避免误改",
                     "reviewed_at": _now_iso(),
                     "status": "fallback",
                 })
                 reviewed_cluster_ids.add(cid)
-                _log(video_tag, f"  ❌ {cid} 未在批量结果中，fallback 到首个 sighting 名")
+                _log(video_tag, f"  ❌ {cid} 未在批量结果中，fallback 到首个 sighting 名（保留全部临时名不替换）")
                 continue
 
             final_name = item.get("final_global_name") or f"[{sightings[0].get('temp_name', cid)}]"
             refined_desc = item.get("refined_visual_description") or sightings[0].get("desc", "")
             chosen_reason = item.get("chosen_reason", "")
-            split_suggestion = item.get("split_suggestion")
+            raw_preserve = item.get("preserve_temp_names") or []
+            preserve_reason = item.get("preserve_reason", "")
 
-            _log(video_tag, f"  📝 {cid} -> {final_name}")
+            preserve_validated: List[str] = []
+            preserve_dropped: List[str] = []
+            seen_norm: set = set()
+            if isinstance(raw_preserve, list):
+                for tn in raw_preserve:
+                    if not isinstance(tn, str):
+                        continue
+                    norm = _normalize_name(tn)
+                    if not norm:
+                        continue
+                    if norm in seen_norm:
+                        continue
+                    if norm not in cluster_temp_norm_to_raw:
+                        preserve_dropped.append(tn)
+                        continue
+                    seen_norm.add(norm)
+                    preserve_validated.append(cluster_temp_norm_to_raw[norm])
+
+            if preserve_validated:
+                replace_tag = (
+                    "🚫全部保留" if len(preserve_validated) == len(cluster_temp_norm_to_raw)
+                    else f"⚠️部分保留 {len(preserve_validated)}/{len(cluster_temp_norm_to_raw)}"
+                )
+            else:
+                replace_tag = "✅全部替换"
+            _log(video_tag, f"  📝 {cid} -> {final_name} | {replace_tag}")
             if chosen_reason:
                 _log(video_tag, f"     选名理由: {chosen_reason}")
+            if preserve_validated:
+                _log(video_tag, f"     保留临时名: {preserve_validated}")
+                if preserve_reason:
+                    _log(video_tag, f"     保留理由: {preserve_reason}")
+            if preserve_dropped:
+                _log(video_tag, f"     ⚠️ 模型输出了不在该聚类临时名列表中的保留项，已忽略: {preserve_dropped}")
 
-            entry = {
+            final_info[cid] = {
+                "final_global_name": final_name,
+                "refined_visual_description": refined_desc,
+                "chosen_reason": chosen_reason,
+                "preserve_temp_names": preserve_validated,
+                "preserve_reason": preserve_reason,
+            }
+            review_log.append({
                 "cluster_id": cid,
                 "final_global_name": final_name,
                 "refined_visual_description": refined_desc,
                 "chosen_reason": chosen_reason,
-                "split_suggestion": split_suggestion,
+                "preserve_temp_names": preserve_validated,
+                "preserve_reason": preserve_reason,
                 "reviewed_at": _now_iso(),
                 "status": "ok",
-            }
-
-            if isinstance(split_suggestion, list) and len(split_suggestion) >= 2:
-                all_idx: List[int] = []
-                for sub in split_suggestion:
-                    all_idx.extend(sub.get("sighting_indices") or [])
-                expected = list(range(len(sightings)))
-                if sorted(all_idx) != expected:
-                    _log(video_tag, f"  ⚠️ {cid} 拆分 indices 不完整或重叠 (got={sorted(all_idx)}, expected={expected})，拆分被拒绝")
-                    entry["status"] = "split_rejected_invalid_indices"
-                    final_info[cid] = {
-                        "final_global_name": final_name,
-                        "refined_visual_description": refined_desc,
-                        "chosen_reason": chosen_reason,
-                    }
-                else:
-                    _log(video_tag, f"  ✂️ 执行拆分: {cid} -> {len(split_suggestion)} 个子聚类")
-                    sub0 = split_suggestion[0]
-                    sub0_indices = sub0.get("sighting_indices") or []
-                    cluster["sightings"] = [sightings[k] for k in sub0_indices]
-                    if sub0_indices:
-                        first_s = sightings[sub0_indices[0]]
-                        sub0_name = sub0.get("inferred_name") or f"[{first_s.get('temp_name', cid)}]"
-                        sub0_desc = sub0.get("inferred_description") or first_s.get("desc", "")
-                    else:
-                        sub0_name = final_name
-                        sub0_desc = refined_desc
-                    final_info[cid] = {
-                        "final_global_name": sub0_name,
-                        "refined_visual_description": sub0_desc,
-                        "chosen_reason": f"SPLIT sub_A (由 {cid} 拆出，原因: {sub0.get('reason', '')})",
-                    }
-                    _log(video_tag, f"    └─ {cid} 保留 sightings={sub0_indices} -> {sub0_name}")
-
-                    for sub in split_suggestion[1:]:
-                        sub_indices = sub.get("sighting_indices") or []
-                        new_cid = _next_cluster_id(global_bank)
-                        if sub_indices:
-                            first_s = sightings[sub_indices[0]]
-                            sub_name = sub.get("inferred_name") or f"[{first_s.get('temp_name', new_cid)}]"
-                            sub_desc = sub.get("inferred_description") or first_s.get("desc", "")
-                        else:
-                            sub_name = f"[{new_cid}]"
-                            sub_desc = ""
-                        new_cluster = {
-                            "cluster_id": new_cid,
-                            "sightings": [sightings[k] for k in sub_indices],
-                        }
-                        global_bank.append(new_cluster)
-                        final_info[new_cid] = {
-                            "final_global_name": sub_name,
-                            "refined_visual_description": sub_desc,
-                            "chosen_reason": f"SPLIT {sub.get('sub_cluster_label', '')} (由 {cid} 拆出，原因: {sub.get('reason', '')})",
-                        }
-                        reviewed_cluster_ids.add(new_cid)
-                        review_log.append({
-                            "cluster_id": new_cid,
-                            "final_global_name": sub_name,
-                            "refined_visual_description": sub_desc,
-                            "chosen_reason": f"SPLIT {sub.get('sub_cluster_label', '')} from {cid}",
-                            "split_suggestion": None,
-                            "reviewed_at": _now_iso(),
-                            "status": "split_child",
-                        })
-                        _log(video_tag, f"    └─ 新增 {new_cid} 接管 sightings={sub_indices} -> {sub_name}")
-
-                    entry["status"] = "split_applied"
-            else:
-                final_info[cid] = {
-                    "final_global_name": final_name,
-                    "refined_visual_description": refined_desc,
-                    "chosen_reason": chosen_reason,
-                }
-
-            review_log.append(entry)
+            })
             reviewed_cluster_ids.add(cid)
 
         _save_review_log(review_log_path, review_log)
@@ -684,6 +660,9 @@ def _phase_c_rewrite(pass1_results, global_bank, chunk_mappings, final_info, vid
                 continue
             final_name = info.get("final_global_name", "")
             if not final_name or not temp_name:
+                continue
+            preserve_set = {_normalize_name(t) for t in info.get("preserve_temp_names") or []}
+            if _normalize_name(temp_name) in preserve_set:
                 continue
             stripped = temp_name.strip()
             if stripped and not (stripped.startswith("[") and stripped.endswith("]")):
@@ -735,18 +714,8 @@ def run_pass2(
     progress_path = os.path.join(run_dir, "pass2_progress.json")
     review_log_path = os.path.join(run_dir, "pass2_review_log.json")
 
-    if os.path.exists(aligned_out_path) and os.path.exists(bank_out_path):
-        _log(video_tag, "\n" + "=" * 60)
-        _log(video_tag, "⏭️  Pass 2 终产物已存在，跳过对齐。")
-        _log(video_tag, "=" * 60)
-        return aligned_out_path, bank_out_path
-
     with open(pass1_json_path, 'r', encoding='utf-8') as f:
         pass1_results = json.load(f)
-
-    _log(video_tag, "\n" + "=" * 60)
-    _log(video_tag, "🚀 启动 Pass 2: 滚动聚类 + 终审命名 + 批量改写")
-    _log(video_tag, "=" * 60)
 
     payload = _load_progress(progress_path)
     global_bank: list = []
@@ -754,24 +723,14 @@ def run_pass2(
     processed_count = 0
     accumulated_story = ""
     low_conf_flags: list = []
-
     if payload and payload.get("schema_version") == 2:
         global_bank = payload.get("global_bank", []) or []
         chunk_mappings = payload.get("chunk_mappings", []) or []
         processed_count = payload.get("processed_chunk_count", 0)
         accumulated_story = payload.get("accumulated_story", "")
         low_conf_flags = payload.get("low_conf_flags", []) or []
-        _log(video_tag, f"🔄 检测到 pass2 断点: 已完成 {processed_count} 个 chunk / 聚类 {len(global_bank)} 个")
     elif payload:
         _log(video_tag, "⚠️ 检测到旧版 pass2 进度文件（schema 不匹配），将重新开始滚动聚类")
-
-    _log(video_tag, "\n---------- Phase A: 滚动聚类 ----------")
-    processed_count, accumulated_story = _phase_a_rolling(
-        cfg, video_path, pass1_results, global_bank, chunk_mappings,
-        processed_count, accumulated_story, low_conf_flags,
-        progress_path, client, token_tracker, video_tag,
-    )
-    _log(video_tag, f"\n✅ Phase A 完成: 共聚类 {len(global_bank)} 个角色 | 低置信软合并 {len(low_conf_flags)} 条")
 
     review_log: list = []
     reviewed_cluster_ids: set = set()
@@ -780,14 +739,48 @@ def run_pass2(
             with open(review_log_path, 'r', encoding='utf-8') as f:
                 review_log = json.load(f).get("reviewed_clusters", []) or []
             reviewed_cluster_ids = {e.get("cluster_id") for e in review_log if e.get("cluster_id")}
-            _log(video_tag, f"🔄 检测到终审断点: 已复核 {len(reviewed_cluster_ids)} 个聚类")
         except Exception as e:
             _log(video_tag, f"⚠️ 读取 pass2_review_log.json 失败: {e}（从头复核）")
             review_log = []
             reviewed_cluster_ids = set()
 
+    bank_cluster_ids = {c["cluster_id"] for c in global_bank}
+    phase_a_done = processed_count >= len(pass1_results)
+    phase_b_done = phase_a_done and (not bank_cluster_ids or bank_cluster_ids.issubset(reviewed_cluster_ids))
+    phase_c_done = os.path.exists(aligned_out_path) and os.path.exists(bank_out_path)
+
+    _log(video_tag, "\n" + "=" * 60)
+    _log(video_tag, f"🚀 Pass 2 状态: "
+                    f"A={'✅' if phase_a_done else '⏳'} ({processed_count}/{len(pass1_results)} chunk) | "
+                    f"B={'✅' if phase_b_done else '⏳'} ({len(reviewed_cluster_ids)}/{len(bank_cluster_ids)} cluster) | "
+                    f"C={'✅' if phase_c_done else '⏳'}")
+    _log(video_tag, "   断点续跑（删文件触发对应阶段重跑）:")
+    _log(video_tag, "     删 pass2_aligned.json / pass2_global_bank.json → 仅重跑 Phase C")
+    _log(video_tag, "     删 pass2_review_log.json                       → 重跑 Phase B + C")
+    _log(video_tag, "     删 pass2_progress.json                         → 重跑 Phase A + B + C")
+    _log(video_tag, "=" * 60)
+
+    if phase_a_done and phase_b_done and phase_c_done:
+        _log(video_tag, "⏭️  全部阶段已完成，跳过 Pass 2。")
+        return aligned_out_path, bank_out_path
+
+    if not phase_a_done:
+        _log(video_tag, "\n---------- Phase A: 滚动聚类 ----------")
+        if processed_count > 0:
+            _log(video_tag, f"🔄 续跑 Phase A: 已完成 {processed_count}/{len(pass1_results)} chunk | 当前聚类 {len(global_bank)} 个")
+        processed_count, accumulated_story = _phase_a_rolling(
+            cfg, video_path, pass1_results, global_bank, chunk_mappings,
+            processed_count, accumulated_story, low_conf_flags,
+            progress_path, client, token_tracker, video_tag,
+        )
+        _log(video_tag, f"\n✅ Phase A 完成: 共聚类 {len(global_bank)} 个角色 | 低置信软合并 {len(low_conf_flags)} 条")
+    else:
+        _log(video_tag, f"\n⏭️  Phase A 已完成（{len(global_bank)} 个聚类），跳过")
+
     if cfg.pass2_review_enable:
         _log(video_tag, "\n---------- Phase B: 高清终审 ----------")
+        if reviewed_cluster_ids:
+            _log(video_tag, f"🔄 已有终审日志: 已复核 {len(reviewed_cluster_ids)} 个聚类")
         final_info = _phase_b_review(
             cfg, video_path, global_bank, review_log,
             reviewed_cluster_ids, review_log_path,
@@ -803,6 +796,8 @@ def run_pass2(
                 "final_global_name": f"[{first.get('temp_name', cid)}]",
                 "refined_visual_description": first.get("desc", ""),
                 "chosen_reason": "REVIEW_DISABLED",
+                "preserve_temp_names": [],
+                "preserve_reason": "",
             }
 
     _log(video_tag, "\n---------- Phase C: 批量 Caption 改写 ----------")
@@ -821,6 +816,8 @@ def run_pass2(
             "外貌特征": info.get("refined_visual_description", ""),
             "出现次数": len(cluster.get("sightings", [])),
             "选名理由": info.get("chosen_reason", ""),
+            "保留原样的临时名": info.get("preserve_temp_names", []),
+            "保留理由": info.get("preserve_reason", ""),
         })
     with open(bank_out_path, 'w', encoding='utf-8') as f:
         json.dump(lite_bank, f, ensure_ascii=False, indent=2)
