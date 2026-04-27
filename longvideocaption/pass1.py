@@ -264,6 +264,7 @@ def _apply_prev_event_revision(chunk_data: dict, global_results: list, video_tag
 
     - 始终从 chunk_data 中 pop 该字段（避免污染当前 chunk 产物）。
     - 仅当 need_merge=True 且 revision.start_time 与上段末事件匹配（按秒数比对，容差 0.01s）时才覆盖。
+    - 与当前 chunk events[0] 冲突时夹紧 revision.end_time（避免跨段 overlap）。
     - 非法或匹配失败时记日志跳过，不影响主流程。
     """
     revision = chunk_data.pop("prev_event_revision", None)
@@ -297,8 +298,32 @@ def _apply_prev_event_revision(chunk_data: dict, global_results: list, video_tag
         )
         return
 
-    old_end = last_ev.get("end_time", "")
-    new_end = revision.get("end_time", old_end)
+    old_end_raw = last_ev.get("end_time", "")
+    old_end_sec = parse_timestamp_to_seconds(old_end_raw)
+    rev_end_raw = revision.get("end_time", old_end_raw)
+    rev_end_sec = parse_timestamp_to_seconds(rev_end_raw)
+
+    current_events = chunk_data.get("events", []) or []
+    if current_events:
+        first_start_raw = current_events[0].get("start_time", "")
+        first_start_sec = parse_timestamp_to_seconds(first_start_raw)
+        if rev_end_sec > first_start_sec + 0.01:
+            if first_start_sec <= old_end_sec + 0.01:
+                _log(
+                    video_tag,
+                    f"⚠️ [修订冲突拒绝] revision.end={rev_end_raw} ({rev_end_sec:.2f}s) 超出当前 events[0].start="
+                    f"{first_start_raw} ({first_start_sec:.2f}s)，且夹紧后 ≤ 原 end_time {old_end_raw}，跳过 revision",
+                )
+                return
+            _log(
+                video_tag,
+                f"⚠️ [修订冲突夹紧] revision.end={rev_end_raw} ({rev_end_sec:.2f}s) → "
+                f"{first_start_raw} ({first_start_sec:.2f}s)（避免与当前 events[0] 重叠）",
+            )
+            rev_end_raw = first_start_raw
+            rev_end_sec = first_start_sec
+
+    new_end = rev_end_raw
     prev_events[-1] = {
         "start_time": last_start_raw,
         "end_time": new_end,
@@ -309,8 +334,110 @@ def _apply_prev_event_revision(chunk_data: dict, global_results: list, video_tag
     }
     _log(
         video_tag,
-        f"🔧 [跨chunk合并] 修订上段末尾 event: end_time {old_end} → {new_end}",
+        f"🔧 [跨chunk合并] 修订上段末尾 event: end_time {old_end_raw} → {new_end}",
     )
+
+
+def _enforce_event_continuity(events: list, video_tag: str) -> None:
+    """按 start_time 排序后扫一遍，修平相邻 event 的 overlap / gap。
+
+    必须在 _validate_and_snap_event_times 之后调用（事件时间已 snap 到白名单）。
+    维护 last_valid 指针，确保被丢弃事件后续的 event 跟"前一个保留事件"对齐，避免
+    drop 引入新的 non-adjacent overlap。
+    - nxt.start < last_valid.end → overlap，吸附 nxt.start = last_valid.end
+    - nxt.start > last_valid.end + 0.01 → gap，吸附 nxt.start = last_valid.end
+    - 调整后 nxt.start >= nxt.end → 丢弃该 nxt（last_valid 不变）。
+    """
+    if not events or len(events) < 2:
+        return
+
+    events.sort(key=lambda ev: parse_timestamp_to_seconds(ev.get("start_time", "")))
+
+    drop_indices = set()
+    last_valid_idx = None
+    for i in range(len(events)):
+        if last_valid_idx is None:
+            last_valid_idx = i
+            continue
+        cur = events[last_valid_idx]
+        nxt = events[i]
+        cur_end_str = cur.get("end_time", "")
+        cur_end_sec = parse_timestamp_to_seconds(cur_end_str)
+        nxt_start_str = nxt.get("start_time", "")
+        nxt_start_sec = parse_timestamp_to_seconds(nxt_start_str)
+        nxt_end_sec = parse_timestamp_to_seconds(nxt.get("end_time", ""))
+
+        if abs(nxt_start_sec - cur_end_sec) > 0.01:
+            if nxt_start_sec < cur_end_sec - 0.01:
+                _log(
+                    video_tag,
+                    f"  ⚠️ [事件连续性] events[{i}].start={nxt_start_str} 早于 events[{last_valid_idx}].end={cur_end_str}，"
+                    f"overlap={cur_end_sec - nxt_start_sec:.2f}s，吸附",
+                )
+            else:
+                gap = nxt_start_sec - cur_end_sec
+                _log(
+                    video_tag,
+                    f"  ⚠️ [事件连续性] events[{last_valid_idx}].end={cur_end_str} 与 events[{i}].start={nxt_start_str} "
+                    f"存在 {gap:.2f}s gap，吸附",
+                )
+            nxt["start_time"] = cur_end_str
+            nxt_start_sec = cur_end_sec
+
+        if nxt_start_sec >= nxt_end_sec - 0.01:
+            _log(
+                video_tag,
+                f"  ⚠️ [事件连续性] events[{i}] 调整后 start>=end "
+                f"({nxt_start_sec:.2f}s >= {nxt_end_sec:.2f}s)，丢弃",
+            )
+            drop_indices.add(i)
+        else:
+            last_valid_idx = i
+
+    for di in sorted(drop_indices, reverse=True):
+        events.pop(di)
+
+
+def _enforce_cross_chunk_continuity(
+    current_events: list,
+    prev_events: list,
+    video_tag: str,
+) -> None:
+    """跨 chunk 兜底：若当前 chunk events[0] 起点早于上段末 event 终点，吸附或丢弃。
+
+    必须在 _apply_prev_event_revision 之后调用（prev_events[-1].end_time 可能已被 revision 覆盖）。
+    """
+    if not prev_events or not current_events:
+        return
+    prev_end_str = prev_events[-1].get("end_time", "")
+    prev_end_sec = parse_timestamp_to_seconds(prev_end_str)
+    if prev_end_sec <= 0:
+        return
+
+    drop_indices = []
+    for idx, ev in enumerate(current_events):
+        start_sec = parse_timestamp_to_seconds(ev.get("start_time", ""))
+        end_sec = parse_timestamp_to_seconds(ev.get("end_time", ""))
+        if end_sec <= prev_end_sec + 0.01:
+            _log(
+                video_tag,
+                f"  ⚠️ [跨段连续性] events[{idx}]={ev.get('start_time')}-{ev.get('end_time')} "
+                f"完全在上段末事件 [..,{prev_end_str}] 内，丢弃",
+            )
+            drop_indices.append(idx)
+            continue
+        if start_sec < prev_end_sec - 0.01:
+            _log(
+                video_tag,
+                f"  ⚠️ [跨段连续性] events[{idx}].start={ev.get('start_time')} 早于上段末 "
+                f"{prev_end_str}，吸附",
+            )
+            ev["start_time"] = prev_end_str
+        else:
+            break
+
+    for di in sorted(set(drop_indices), reverse=True):
+        current_events.pop(di)
 
 
 def _resume_from_progress(
@@ -488,13 +615,26 @@ def run_pass1(
                 chunk_start, chunk_end,
                 video_tag,
             )
+            _enforce_event_continuity(chunk_data.get("events", []), video_tag)
+
             _validate_revision_end_time(
                 chunk_data.get("prev_event_revision"),
                 timestamps_str_list,
                 video_tag,
             )
 
+            prev_events_before = (
+                global_results[-1].get("data", {}).get("events", [])
+                if global_results else []
+            )
             _apply_prev_event_revision(chunk_data, global_results, video_tag)
+
+            _enforce_cross_chunk_continuity(
+                chunk_data.get("events", []),
+                prev_events_before,
+                video_tag,
+            )
+            _enforce_event_continuity(chunk_data.get("events", []), video_tag)
 
             global_results.append({"chunk_time_range": chunk_name, "data": chunk_data})
 
