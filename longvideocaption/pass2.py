@@ -783,11 +783,19 @@ def run_pass2(
         _log(video_tag, "\n---------- Phase A: 滚动聚类 ----------")
         if processed_count > 0:
             _log(video_tag, f"🔄 续跑 Phase A: 已完成 {processed_count}/{len(pass1_results)} chunk | 当前聚类 {len(global_bank)} 个")
-        processed_count, accumulated_story = _phase_a_rolling(
-            cfg, video_path, pass1_results, global_bank, chunk_mappings,
-            processed_count, accumulated_story, low_conf_flags,
-            progress_path, client, token_tracker, video_tag,
-        )
+        if token_tracker is not None:
+            with token_tracker.stage_timer(PASS_NAME):
+                processed_count, accumulated_story = _phase_a_rolling(
+                    cfg, video_path, pass1_results, global_bank, chunk_mappings,
+                    processed_count, accumulated_story, low_conf_flags,
+                    progress_path, client, token_tracker, video_tag,
+                )
+        else:
+            processed_count, accumulated_story = _phase_a_rolling(
+                cfg, video_path, pass1_results, global_bank, chunk_mappings,
+                processed_count, accumulated_story, low_conf_flags,
+                progress_path, client, token_tracker, video_tag,
+            )
         _log(video_tag, f"\n✅ Phase A 完成: 共聚类 {len(global_bank)} 个角色 | 低置信软合并 {len(low_conf_flags)} 条")
     else:
         _log(video_tag, f"\n⏭️  Phase A 已完成（{len(global_bank)} 个聚类），跳过")
@@ -796,11 +804,19 @@ def run_pass2(
         _log(video_tag, "\n---------- Phase B: 高清终审 ----------")
         if reviewed_cluster_ids:
             _log(video_tag, f"🔄 已有终审日志: 已复核 {len(reviewed_cluster_ids)} 个聚类")
-        final_info = _phase_b_review(
-            cfg, video_path, global_bank, review_log,
-            reviewed_cluster_ids, review_log_path,
-            client, token_tracker, video_tag,
-        )
+        if token_tracker is not None:
+            with token_tracker.stage_timer(REVIEW_STAGE_NAME):
+                final_info = _phase_b_review(
+                    cfg, video_path, global_bank, review_log,
+                    reviewed_cluster_ids, review_log_path,
+                    client, token_tracker, video_tag,
+                )
+        else:
+            final_info = _phase_b_review(
+                cfg, video_path, global_bank, review_log,
+                reviewed_cluster_ids, review_log_path,
+                client, token_tracker, video_tag,
+            )
     else:
         _log(video_tag, "\n⏭️  Phase B 被配置关闭 (pass2_review_enable=False)，使用首个 sighting 的 temp_name 作为全局名")
         final_info = {}

@@ -95,6 +95,8 @@ def run_batch(cfg: PipelineConfig, input_path: str, output_root: str) -> dict:
     print(f"# 总 Token: prompt={grand.get('prompt_tokens', 0)}  "
           f"completion={grand.get('completion_tokens', 0)}  "
           f"total={grand.get('total_tokens', 0)}  calls={grand.get('calls', 0)}")
+    print(f"# 累计打标耗时（含历史续跑）: {summary['aggregate_tokens'].get('total_seconds_hms', '00:00:00')}  "
+          f"({summary['aggregate_tokens'].get('total_seconds', 0.0)}s)")
     print(f"# 聚合表: {agg_path}")
     print(f"# 运行摘要: {run_summary_path}")
     print("#" * 70)
