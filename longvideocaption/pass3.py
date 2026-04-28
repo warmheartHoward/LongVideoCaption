@@ -57,6 +57,101 @@ SYS_PROMPT = """你是一个资深的电影剧本统筹。
 }"""
 
 
+def _validate_chapters(chapters: list, all_events: list, video_tag: str) -> list:
+    """Pass 3 章节校验：V2 排序 + V3 边界吸附到 event 边界 + V4 相邻首尾相连 + 重新编号。
+
+    - V3 隐含格式归一化（snap 后字符串来自 event 原值，与 pass1 白名单一致）。
+    - 首尾章节强制对齐 events[0].start / events[-1].end，避免漏首/漏尾。
+    - V4 用区间内最接近中点的 event start 作为切点，无候选时退化为 cur_end / nxt_start。
+    - 就地改写 start_time / end_time / chapter_id，返回排序后的新列表。
+    """
+    if not chapters or not all_events:
+        return chapters
+
+    event_starts = [
+        (ev.get("start_time", ""), parse_timestamp_to_seconds(ev.get("start_time", "")))
+        for ev in all_events
+    ]
+    event_ends = [
+        (ev.get("end_time", ""), parse_timestamp_to_seconds(ev.get("end_time", "")))
+        for ev in all_events
+    ]
+
+    sorted_chapters = sorted(
+        chapters,
+        key=lambda c: parse_timestamp_to_seconds(c.get("start_time", "")),
+    )
+    if sorted_chapters != chapters:
+        _log(video_tag, "  ⚠️ [Pass3校验] 章节非按时间排序，已重排")
+
+    for idx, ch in enumerate(sorted_chapters):
+        s_raw_orig = ch.get("start_time", "")
+        e_raw_orig = ch.get("end_time", "")
+        s_sec = parse_timestamp_to_seconds(s_raw_orig)
+        e_sec = parse_timestamp_to_seconds(e_raw_orig)
+
+        if idx == 0:
+            new_start_raw, _ = event_starts[0]
+        else:
+            new_start_raw, _ = min(event_starts, key=lambda p: abs(p[1] - s_sec))
+
+        if idx == len(sorted_chapters) - 1:
+            new_end_raw, _ = event_ends[-1]
+        else:
+            new_end_raw, _ = min(event_ends, key=lambda p: abs(p[1] - e_sec))
+
+        if new_start_raw != s_raw_orig or new_end_raw != e_raw_orig:
+            _log(
+                video_tag,
+                f"  ⚠️ [Pass3校验] ch[{idx}] 边界吸附 [{s_raw_orig},{e_raw_orig}] → "
+                f"[{new_start_raw},{new_end_raw}]",
+            )
+        ch["start_time"] = new_start_raw
+        ch["end_time"] = new_end_raw
+
+    for i in range(len(sorted_chapters) - 1):
+        cur = sorted_chapters[i]
+        nxt = sorted_chapters[i + 1]
+        cur_end_raw = cur.get("end_time", "")
+        nxt_start_raw = nxt.get("start_time", "")
+        if cur_end_raw == nxt_start_raw:
+            continue
+
+        cur_end_sec = parse_timestamp_to_seconds(cur_end_raw)
+        nxt_start_sec = parse_timestamp_to_seconds(nxt_start_raw)
+        cur_start_sec = parse_timestamp_to_seconds(cur.get("start_time", ""))
+        nxt_end_sec = parse_timestamp_to_seconds(nxt.get("end_time", ""))
+
+        candidates = [p for p in event_starts if cur_start_sec < p[1] <= nxt_end_sec]
+        mid_sec = (cur_end_sec + nxt_start_sec) / 2.0
+        if candidates:
+            chosen_raw, _ = min(candidates, key=lambda p: abs(p[1] - mid_sec))
+        elif cur_end_sec < nxt_start_sec:
+            chosen_raw = nxt_start_raw
+        else:
+            chosen_raw = cur_end_raw
+
+        if cur_end_sec < nxt_start_sec - 0.01:
+            _log(
+                video_tag,
+                f"  ⚠️ [Pass3校验] ch[{i}].end={cur_end_raw} 与 ch[{i+1}].start={nxt_start_raw} "
+                f"间存在 {nxt_start_sec - cur_end_sec:.2f}s gap，切点定为 {chosen_raw}",
+            )
+        elif cur_end_sec > nxt_start_sec + 0.01:
+            _log(
+                video_tag,
+                f"  ⚠️ [Pass3校验] ch[{i}].end={cur_end_raw} 与 ch[{i+1}].start={nxt_start_raw} "
+                f"重叠 {cur_end_sec - nxt_start_sec:.2f}s，切点定为 {chosen_raw}",
+            )
+        cur["end_time"] = chosen_raw
+        nxt["start_time"] = chosen_raw
+
+    for idx, ch in enumerate(sorted_chapters):
+        ch["chapter_id"] = f"ch_{idx+1:02d}"
+
+    return sorted_chapters
+
+
 def _build_character_bank_text(name_to_desc: dict) -> str:
     if not name_to_desc:
         return "（无角色图鉴）"
@@ -165,62 +260,66 @@ def _assemble_final(video_path: str, chapter_agg_result: dict, all_events: list,
             "end_time": all_events[-1]["end_time"] if all_events else "[00:00:00.000]",
         }]
 
+    chapter_objs = []
+    ch_ranges = []
     for ch_idx, ch_def in enumerate(chapters_def):
         ch_start_str = ch_def.get("start_time", "")
         ch_end_str = ch_def.get("end_time", "")
-
-        ch_start_sec = parse_timestamp_to_seconds(ch_start_str)
-        ch_end_sec = parse_timestamp_to_seconds(ch_end_str)
-
-        if ch_idx == len(chapters_def) - 1:
-            ch_end_sec += 9999.0
-
-        chapter_obj = {
+        chapter_objs.append({
             "chapter_id": ch_def.get("chapter_id", f"ch_{ch_idx+1:02d}"),
             "title": ch_def.get("title", f"第 {ch_idx+1} 章"),
             "chapter_summary": ch_def.get("chapter_summary", ""),
             "start_time": ch_start_str,
             "end_time": ch_end_str,
             "events": [],
-        }
+        })
+        ch_start_sec = parse_timestamp_to_seconds(ch_start_str)
+        ch_end_sec = parse_timestamp_to_seconds(ch_end_str)
+        if ch_idx == len(chapters_def) - 1:
+            ch_end_sec += 9999.0
+        ch_ranges.append((ch_start_sec, ch_end_sec))
 
-        for ev in all_events:
-            ev_start_sec = parse_timestamp_to_seconds(ev.get("start_time", ""))
+    unbound = []
+    for ev in all_events:
+        ev_start_sec = parse_timestamp_to_seconds(ev.get("start_time", ""))
+        target = None
+        for ch_idx, (cs, ce) in enumerate(ch_ranges):
+            if cs - 0.5 <= ev_start_sec < ce:
+                target = ch_idx
+                break
+        if target is None:
+            unbound.append(ev)
+            continue
+        ch_obj = chapter_objs[target]
+        step3_text = ev.get("step3_synthesized_dense_caption", "")
+        ch_obj["events"].append({
+            "event_id": f"ev_{(target+1):02d}_{len(ch_obj['events'])+1:03d}",
+            "start_time": ev.get("start_time", ""),
+            "end_time": ev.get("end_time", ""),
+            "step1_objective_visual": ev.get("step1_objective_visual", ""),
+            "step2_contextual_reasoning": ev.get("step2_contextual_reasoning", ""),
+            "step3_synthesized_dense_caption": step3_text,
+            "characters_in_event": _extract_event_characters(step3_text, name_to_desc),
+            "key_frame_times": ev.get("key_frame_times", []),
+        })
 
-            if ch_start_sec - 0.5 <= ev_start_sec < ch_end_sec:
-                step3_text = ev.get("step3_synthesized_dense_caption", "")
-                chapter_obj["events"].append({
-                    "event_id": f"ev_{(ch_idx+1):02d}_{len(chapter_obj['events'])+1:03d}",
-                    "start_time": ev.get("start_time", ""),
-                    "end_time": ev.get("end_time", ""),
-                    "step1_objective_visual": ev.get("step1_objective_visual", ""),
-                    "step2_contextual_reasoning": ev.get("step2_contextual_reasoning", ""),
-                    "step3_synthesized_dense_caption": step3_text,
-                    "characters_in_event": _extract_event_characters(step3_text, name_to_desc),
-                    "key_frame_times": ev.get("key_frame_times", []),
-                })
+    if unbound:
+        _log(video_tag, f"⚠️ 警告: 有 {len(unbound)} 个事件越界未挂载，已强制追加至最终章。")
+        last_chapter = chapter_objs[-1]
+        for ev in unbound:
+            step3_text = ev.get("step3_synthesized_dense_caption", "")
+            last_chapter["events"].append({
+                "event_id": f"ev_fallback_{len(last_chapter['events'])+1:03d}",
+                "start_time": ev.get("start_time", ""),
+                "end_time": ev.get("end_time", ""),
+                "step1_objective_visual": ev.get("step1_objective_visual", ""),
+                "step2_contextual_reasoning": ev.get("step2_contextual_reasoning", ""),
+                "step3_synthesized_dense_caption": step3_text,
+                "characters_in_event": _extract_event_characters(step3_text, name_to_desc),
+                "key_frame_times": ev.get("key_frame_times", []),
+            })
 
-        final_json["chapters"].append(chapter_obj)
-
-    assigned_event_count = sum(len(ch["events"]) for ch in final_json["chapters"])
-    if assigned_event_count < len(all_events):
-        _log(video_tag, f"⚠️ 警告: 有 {len(all_events) - assigned_event_count} 个事件越界未挂载，已强制追加至最终章。")
-        last_chapter = final_json["chapters"][-1]
-        for ev in all_events:
-            ev_start_sec = parse_timestamp_to_seconds(ev.get("start_time", ""))
-            if ev_start_sec >= parse_timestamp_to_seconds(last_chapter["end_time"]):
-                step3_text = ev.get("step3_synthesized_dense_caption", "")
-                last_chapter["events"].append({
-                    "event_id": f"ev_fallback_{len(last_chapter['events'])+1:03d}",
-                    "start_time": ev.get("start_time", ""),
-                    "end_time": ev.get("end_time", ""),
-                    "step1_objective_visual": ev.get("step1_objective_visual", ""),
-                    "step2_contextual_reasoning": ev.get("step2_contextual_reasoning", ""),
-                    "step3_synthesized_dense_caption": step3_text,
-                    "characters_in_event": _extract_event_characters(step3_text, name_to_desc),
-                    "key_frame_times": ev.get("key_frame_times", []),
-                })
-
+    final_json["chapters"] = chapter_objs
     return final_json
 
 
@@ -257,6 +356,12 @@ def run_pass3(
             _log(video_tag, f"⚠️ 全局图鉴加载失败，event 角色字段将仅含 name 而无 desc: {e}")
 
     chapter_agg_result, all_events = _run_chapter_aggregation(cfg, aligned_results, name_to_desc, run_dir, client, token_tracker, video_tag)
+
+    if chapter_agg_result.get("chapters"):
+        chapter_agg_result["chapters"] = _validate_chapters(
+            chapter_agg_result["chapters"], all_events, video_tag,
+        )
+
     final_storyboard = _assemble_final(video_path, chapter_agg_result, all_events, name_to_desc, video_tag)
 
     with open(final_output_path, 'w', encoding='utf-8') as f:
