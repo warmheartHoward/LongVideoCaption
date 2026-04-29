@@ -15,7 +15,13 @@ from .frame_extractor import (
 from .llm_client import request_llm_with_retry
 from .prompts.pass1_v3 import build_sys_prompt, build_usr_prompt
 from .token_tracker import TokenTracker
-from .utils import format_timestamp, format_timestamp_sec, parse_timestamp_to_seconds, sanitize_filename
+from .utils import (
+    format_timestamp,
+    format_timestamp_sec,
+    parse_timestamp_to_seconds,
+    parse_timestamp_to_seconds_strict,
+    sanitize_filename,
+)
 
 
 PASS_NAME = "pass1_perception"
@@ -180,11 +186,20 @@ def _validate_and_snap_event_times(
     if not whitelist_str_list or not events:
         return
 
-    whitelist_map = {s: parse_timestamp_to_seconds(s) for s in whitelist_str_list}
+    whitelist_map = {
+        s: parsed
+        for s in whitelist_str_list
+        if (parsed := parse_timestamp_to_seconds_strict(s)) is not None
+    }
+    if not whitelist_map:
+        return
     sorted_items = sorted(whitelist_map.items(), key=lambda p: p[1])
 
-    def _snap(ts_str: str, label: str) -> Tuple[str, float]:
-        target = parse_timestamp_to_seconds(ts_str)
+    def _snap(ts_str: str, label: str) -> Optional[Tuple[str, float]]:
+        target = parse_timestamp_to_seconds_strict(ts_str)
+        if target is None:
+            _log(video_tag, f"  ⚠️ [时间戳校准] {label}={ts_str!r} 格式无效，丢弃对应 event")
+            return None
         for wl_str, wl_sec in sorted_items:
             if abs(wl_sec - target) < 0.01:
                 return wl_str, wl_sec
@@ -214,8 +229,13 @@ def _validate_and_snap_event_times(
 
     drop_indices = []
     for idx, ev in enumerate(events):
-        start_str, start_sec = _snap(ev.get("start_time", ""), f"event[{idx}].start")
-        end_str, end_sec = _snap(ev.get("end_time", ""), f"event[{idx}].end")
+        snapped_start = _snap(ev.get("start_time", ""), f"event[{idx}].start")
+        snapped_end = _snap(ev.get("end_time", ""), f"event[{idx}].end")
+        if snapped_start is None or snapped_end is None:
+            drop_indices.append(idx)
+            continue
+        start_str, start_sec = snapped_start
+        end_str, end_sec = snapped_end
 
         if start_sec > end_sec:
             _log(video_tag, f"  ⚠️ [时间戳校准] event[{idx}] start>end，自动交换 ({start_str} ↔ {end_str})")
@@ -263,8 +283,17 @@ def _validate_revision_end_time(
     if not end_str:
         return
 
-    whitelist_map = {s: parse_timestamp_to_seconds(s) for s in whitelist_str_list}
-    target = parse_timestamp_to_seconds(end_str)
+    whitelist_map = {
+        s: parsed
+        for s in whitelist_str_list
+        if (parsed := parse_timestamp_to_seconds_strict(s)) is not None
+    }
+    if not whitelist_map:
+        return
+    target = parse_timestamp_to_seconds_strict(end_str)
+    if target is None:
+        _log(video_tag, f"  ⚠️ [时间戳校准] revision.end={end_str!r} 格式无效，跳过 revision end 校准")
+        return
     for wl_str, wl_sec in whitelist_map.items():
         if abs(wl_sec - target) < 0.01:
             revision["end_time"] = wl_str
@@ -591,8 +620,7 @@ def _build_scene_whitelist(
     """从全片 scene 列表里提取落在 [chunk_start, chunk_end] 内的镜头切换时间点（秒）。
 
     pyscenedetect 返回的 scene = (s_start, s_end)，相邻 scene 的 s_end / s_start 重合，
-    set 去重后即为该 chunk 内的镜头切换点集合。完全由 scenedetect 决定，**不强加
-    chunk_start / chunk_end**。模型只能在这些镜头切换点中选取 event 起止时间。
+    set 去重后即为该 chunk 内的镜头切换点集合。
     """
     boundaries: set = set()
     for s_start_raw, s_end_raw in precomputed_scenes:
@@ -612,7 +640,9 @@ def _resume_from_progress(
     """
     last_ev = events[-1]
     last_end_str = last_ev.get("end_time", "")
-    last_end_sec = parse_timestamp_to_seconds(last_end_str)
+    last_end_sec = parse_timestamp_to_seconds_strict(last_end_str)
+    if last_end_sec is None:
+        raise ValueError(f"历史进度末尾 event.end_time 格式无效: {last_end_str!r}")
     last_action = last_ev.get("step3_synthesized_dense_caption", "")
 
     n = max(0, int(cfg.prev_event_overlap_count))
@@ -620,8 +650,9 @@ def _resume_from_progress(
         return last_end_sec, last_end_str, last_action, False, []
 
     k = min(n, len(events))
-    proposed = parse_timestamp_to_seconds(events[-k].get("start_time", ""))
-    if 0 < proposed < last_end_sec:
+    anchor_start_str = events[-k].get("start_time", "")
+    proposed = parse_timestamp_to_seconds_strict(anchor_start_str)
+    if proposed is not None and 0 < proposed < last_end_sec:
         return proposed, last_end_str, last_action, True, list(events[-k:])
     return last_end_sec, last_end_str, last_action, False, []
 
@@ -641,7 +672,7 @@ def run_pass1(
 
     _log_context.log_file = os.path.join(run_dir, "pass1.log")
 
-    total_duration = float(int(get_video_duration(video_path)))
+    total_duration = float(get_video_duration(video_path))
 
     precomputed_scenes = None
     if cfg.frame_extraction_strategy == "scenedetect":
@@ -871,7 +902,7 @@ def run_pass1(
                     accumulated_story = "\n".join(history_summaries) if history_summaries else "暂无"
                     previous_context = (
                         f"【全局剧情脉络】:\n{accumulated_story}\n\n"
-                        f"【当前无缝接力要求】: 上一幕的最后一个事件是：'{last_action}'，结束于 {format_timestamp(last_end_str)}。"
+                        f"【当前无缝接力要求】: 上一幕的最后一个事件是：'{last_action}'，结束于 {last_end_str}。"
                         f"请紧接着这个动作和时间点继续描述。"
                     )
             else:

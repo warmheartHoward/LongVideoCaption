@@ -1,25 +1,30 @@
 import re
+from typing import Optional
 
 
 def format_timestamp(seconds: float) -> str:
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    millis = int(round((seconds - int(seconds)) * 1000))
+    total_millis = int(round(float(seconds) * 1000))
+    hours = total_millis // 3_600_000
+    minutes = (total_millis % 3_600_000) // 60_000
+    secs = (total_millis % 60_000) // 1000
+    millis = total_millis % 1000
     return f"[{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}]"
 
 
 def format_timestamp_sec(seconds: float) -> str:
-    total = int(round(seconds))
+    total_millis = int(round(float(seconds) * 1000))
+    if total_millis % 1000:
+        return format_timestamp(seconds)
+    total = total_millis // 1000
     hours = total // 3600
     minutes = (total % 3600) // 60
     secs = total % 60
     return f"[{hours:02d}:{minutes:02d}:{secs:02d}]"
 
 
-def parse_timestamp_to_seconds(ts_str: str) -> float:
+def parse_timestamp_to_seconds_strict(ts_str: str) -> Optional[float]:
     if not isinstance(ts_str, str):
-        return 0.0
+        return None
     clean_str = ts_str.strip('[] ')
     try:
         parts = clean_str.split(':')
@@ -29,9 +34,16 @@ def parse_timestamp_to_seconds(ts_str: str) -> float:
             if len(sec_parts) > 1:
                 seconds += float(f"0.{sec_parts[1]}")
             return seconds
-        return 0.0
+        return None
     except Exception:
+        return None
+
+
+def parse_timestamp_to_seconds(ts_str: str) -> float:
+    seconds = parse_timestamp_to_seconds_strict(ts_str)
+    if seconds is None:
         return 0.0
+    return seconds
 
 
 def clean_json_response(raw_text: str) -> str:
