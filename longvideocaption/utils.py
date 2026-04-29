@@ -12,31 +12,36 @@ def format_timestamp(seconds: float) -> str:
 
 
 def format_timestamp_sec(seconds: float) -> str:
-    total_millis = int(round(float(seconds) * 1000))
-    if total_millis % 1000:
-        return format_timestamp(seconds)
-    total = total_millis // 1000
+    total = int(round(float(seconds)))
     hours = total // 3600
     minutes = (total % 3600) // 60
     secs = total % 60
     return f"[{hours:02d}:{minutes:02d}:{secs:02d}]"
 
 
+def format_timestamp_for_mode(seconds: float, mode: str) -> str:
+    if mode == "millisecond":
+        return format_timestamp(seconds)
+    if mode == "second":
+        return format_timestamp_sec(seconds)
+    raise ValueError(f"不支持的 timestamp 模式: {mode!r}，应为 'second' 或 'millisecond'")
+
+
+_TIMESTAMP_RE = re.compile(r'^\[?(\d{2,}):([0-5]\d):([0-5]\d)(?:\.(\d{3}))?\]?$')
+
+
 def parse_timestamp_to_seconds_strict(ts_str: str) -> Optional[float]:
     if not isinstance(ts_str, str):
         return None
-    clean_str = ts_str.strip('[] ')
-    try:
-        parts = clean_str.split(':')
-        if len(parts) == 3:
-            sec_parts = parts[2].split('.')
-            seconds = float(int(parts[0]) * 3600 + int(parts[1]) * 60 + int(sec_parts[0]))
-            if len(sec_parts) > 1:
-                seconds += float(f"0.{sec_parts[1]}")
-            return seconds
+    match = _TIMESTAMP_RE.fullmatch(ts_str.strip())
+    if not match:
         return None
-    except Exception:
-        return None
+
+    hours, minutes, seconds, millis = match.groups()
+    total = int(hours) * 3600 + int(minutes) * 60 + int(seconds)
+    if millis is not None:
+        total += int(millis) / 1000.0
+    return float(total)
 
 
 def parse_timestamp_to_seconds(ts_str: str) -> float:

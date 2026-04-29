@@ -17,7 +17,7 @@ from .prompts.pass1_v3 import build_sys_prompt, build_usr_prompt
 from .token_tracker import TokenTracker
 from .utils import (
     format_timestamp,
-    format_timestamp_sec,
+    format_timestamp_for_mode,
     parse_timestamp_to_seconds,
     parse_timestamp_to_seconds_strict,
     sanitize_filename,
@@ -159,11 +159,30 @@ def _pick_next_start(
 
 
 def _record_large_snap_delta(stats: Optional[dict], delta: float, label: str) -> None:
-    if stats is None or delta <= 1.0:
+    abs_delta = abs(float(delta))
+    if stats is None or abs_delta <= 1.0:
         return
-    stats["large_snap_delta_sum"] = round(float(stats.get("large_snap_delta_sum", 0.0)) + float(delta), 3)
+    stats["large_snap_delta_sum"] = round(float(stats.get("large_snap_delta_sum", 0.0)) + abs_delta, 3)
     details = stats.setdefault("large_snap_deltas", [])
-    details.append({"label": label, "delta_sec": round(float(delta), 3)})
+    details.append({"label": label, "abs_delta_sec": round(abs_delta, 3)})
+
+
+def _default_validation_summary() -> dict:
+    return {
+        "dropped_invalid_time_count": 0,
+        "dropped_too_short_count": 0,
+        "dropped_overlap_count": 0,
+        "continuity_snap_count": 0,
+        "cross_chunk_snap_count": 0,
+        "swap_count": 0,
+    }
+
+
+def _record_validation_stat(stats: Optional[dict], key: str, amount: int = 1) -> None:
+    if stats is None:
+        return
+    summary = stats.setdefault("event_validation_summary", _default_validation_summary())
+    summary[key] = int(summary.get(key, 0) or 0) + int(amount)
 
 
 def _validate_and_snap_event_times(
@@ -232,6 +251,7 @@ def _validate_and_snap_event_times(
         snapped_start = _snap(ev.get("start_time", ""), f"event[{idx}].start")
         snapped_end = _snap(ev.get("end_time", ""), f"event[{idx}].end")
         if snapped_start is None or snapped_end is None:
+            _record_validation_stat(stats, "dropped_invalid_time_count")
             drop_indices.append(idx)
             continue
         start_str, start_sec = snapped_start
@@ -239,11 +259,13 @@ def _validate_and_snap_event_times(
 
         if start_sec > end_sec:
             _log(video_tag, f"  ⚠️ [时间戳校准] event[{idx}] start>end，自动交换 ({start_str} ↔ {end_str})")
+            _record_validation_stat(stats, "swap_count")
             start_str, end_str = end_str, start_str
             start_sec, end_sec = end_sec, start_sec
 
         if end_sec - start_sec < 0.1:
             _log(video_tag, f"  ⚠️ [时间戳校准] event[{idx}] Δ={end_sec - start_sec:.3f}s < 0.1s，丢弃")
+            _record_validation_stat(stats, "dropped_too_short_count")
             drop_indices.append(idx)
             continue
 
@@ -327,6 +349,104 @@ def _flatten_events(global_results: list) -> list:
     return flat
 
 
+def _compute_event_time_continuity(flat_events: list) -> dict:
+    overlaps = []
+    adjacency_break_count = 0
+    eps = 0.01
+    prev = None
+    for item in flat_events:
+        if prev is None:
+            prev = item
+            continue
+        delta = item["start_sec"] - prev["end_sec"]
+        if abs(delta) > eps:
+            adjacency_break_count += 1
+        if delta < -eps:
+            overlap_sec = prev["end_sec"] - item["start_sec"]
+            overlaps.append({
+                "prev_event": f"{prev['start_time']} - {prev['end_time']}",
+                "current_event": f"{item['start_time']} - {item['end_time']}",
+                "overlap_sec": round(overlap_sec, 3),
+                "prev_chunk_index": prev["chunk_index"],
+                "prev_event_index": prev["event_index"],
+                "current_chunk_index": item["chunk_index"],
+                "current_event_index": item["event_index"],
+            })
+        if item["end_sec"] > prev["end_sec"]:
+            prev = item
+
+    total_overlap = round(sum(item["overlap_sec"] for item in overlaps), 3)
+    return {
+        "overlap_count": len(overlaps),
+        "total_overlap_sec": total_overlap,
+        "max_overlap_sec": max((item["overlap_sec"] for item in overlaps), default=0.0),
+        "overlaps": overlaps,
+        "adjacency_break_count": adjacency_break_count,
+    }
+
+
+def _compute_event_duration_distribution(flat_events: list) -> dict:
+    durations = [
+        max(0.0, item["end_sec"] - item["start_sec"])
+        for item in flat_events
+        if item["end_sec"] > item["start_sec"]
+    ]
+    if not durations:
+        return {
+            "min_sec": 0.0,
+            "max_sec": 0.0,
+            "avg_sec": 0.0,
+            "median_sec": 0.0,
+            "too_short_threshold_sec": 1.0,
+            "too_short_count": 0,
+            "too_long_threshold_sec": 60.0,
+            "too_long_count": 0,
+        }
+
+    sorted_durations = sorted(durations)
+    mid = len(sorted_durations) // 2
+    if len(sorted_durations) % 2:
+        median = sorted_durations[mid]
+    else:
+        median = (sorted_durations[mid - 1] + sorted_durations[mid]) / 2.0
+    too_short_threshold = 1.0
+    too_long_threshold = 60.0
+    return {
+        "min_sec": round(min(durations), 3),
+        "max_sec": round(max(durations), 3),
+        "avg_sec": round(sum(durations) / len(durations), 3),
+        "median_sec": round(median, 3),
+        "too_short_threshold_sec": too_short_threshold,
+        "too_short_count": sum(1 for d in durations if d < too_short_threshold),
+        "too_long_threshold_sec": too_long_threshold,
+        "too_long_count": sum(1 for d in durations if d > too_long_threshold),
+    }
+
+
+def _compute_event_content_health(global_results: list) -> dict:
+    health = {
+        "missing_step1_count": 0,
+        "missing_step2_count": 0,
+        "missing_step3_count": 0,
+        "missing_key_frame_times_count": 0,
+        "empty_characters_in_chunk_count": 0,
+    }
+    for chunk in global_results:
+        data = chunk.get("data", {}) or {}
+        if not data.get("characters_in_chunk"):
+            health["empty_characters_in_chunk_count"] += 1
+        for ev in data.get("events", []) or []:
+            if not (ev.get("step1_objective_visual", "") or "").strip():
+                health["missing_step1_count"] += 1
+            if not (ev.get("step2_contextual_reasoning", "") or "").strip():
+                health["missing_step2_count"] += 1
+            if not (ev.get("step3_synthesized_dense_caption", "") or "").strip():
+                health["missing_step3_count"] += 1
+            if not ev.get("key_frame_times"):
+                health["missing_key_frame_times_count"] += 1
+    return health
+
+
 def _compute_pass1_confidence(global_results: list, total_duration: float, stats: Optional[dict] = None) -> dict:
     flat_events = _flatten_events(global_results)
     gap_segments = []
@@ -376,6 +496,8 @@ def _compute_pass1_confidence(global_results: list, total_duration: float, stats
             })
 
     large_delta_sum = round(float((stats or {}).get("large_snap_delta_sum", 0.0) or 0.0), 3)
+    validation_summary = _default_validation_summary()
+    validation_summary.update((stats or {}).get("event_validation_summary", {}) or {})
     return {
         "video_duration_sec": round(float(total_duration), 3),
         "event_count": len(flat_events),
@@ -385,6 +507,10 @@ def _compute_pass1_confidence(global_results: list, total_duration: float, stats
             "total_gap_sec": round(sum(seg["gap_sec"] for seg in gap_segments), 3),
             "gaps": gap_segments,
         },
+        "event_time_continuity": _compute_event_time_continuity(flat_events),
+        "event_validation_summary": validation_summary,
+        "event_duration_distribution": _compute_event_duration_distribution(flat_events),
+        "event_content_health": _compute_event_content_health(global_results),
         "key_frame_time_validity": {
             "total_key_frame_times": total_key_frames,
             "invalid_count": invalid_key_frames_count,
@@ -393,7 +519,7 @@ def _compute_pass1_confidence(global_results: list, total_duration: float, stats
         },
         "timestamp_calibration": {
             "large_delta_threshold_sec": 1.0,
-            "large_delta_sum_sec": large_delta_sum,
+            "large_abs_delta_sum_sec": large_delta_sum,
             "large_delta_count": len((stats or {}).get("large_snap_deltas", [])),
             "large_deltas": list((stats or {}).get("large_snap_deltas", [])),
         },
@@ -415,7 +541,11 @@ def _write_pass1_confidence(
 
 def _load_existing_confidence_stats(run_dir: str) -> dict:
     confidence_path = os.path.join(run_dir, "pass1_confidence.json")
-    default = {"large_snap_delta_sum": 0.0, "large_snap_deltas": []}
+    default = {
+        "large_snap_delta_sum": 0.0,
+        "large_snap_deltas": [],
+        "event_validation_summary": _default_validation_summary(),
+    }
     if not os.path.exists(confidence_path):
         return default
     try:
@@ -423,9 +553,14 @@ def _load_existing_confidence_stats(run_dir: str) -> dict:
             payload = json.load(f)
         calibration = payload.get("timestamp_calibration", {}) or {}
         details = calibration.get("large_deltas", []) or []
+        delta_sum = calibration.get("large_abs_delta_sum_sec", calibration.get("large_delta_sum_sec", 0.0))
         return {
-            "large_snap_delta_sum": float(calibration.get("large_delta_sum_sec", 0.0) or 0.0),
+            "large_snap_delta_sum": float(delta_sum or 0.0),
             "large_snap_deltas": list(details),
+            "event_validation_summary": {
+                **_default_validation_summary(),
+                **(payload.get("event_validation_summary", {}) or {}),
+            },
         }
     except Exception:
         return default
@@ -510,7 +645,7 @@ def _apply_prev_event_revision(chunk_data: dict, global_results: list, video_tag
     )
 
 
-def _enforce_event_continuity(events: list, video_tag: str) -> None:
+def _enforce_event_continuity(events: list, video_tag: str, stats: Optional[dict] = None) -> None:
     """按 start_time 排序后扫一遍，修平相邻 event 的 overlap / gap。
 
     必须在 _validate_and_snap_event_times 之后调用（事件时间已 snap 到白名单）。
@@ -541,6 +676,7 @@ def _enforce_event_continuity(events: list, video_tag: str) -> None:
 
         if abs(nxt_start_sec - cur_end_sec) > 0.01:
             if nxt_start_sec < cur_end_sec - 0.01:
+                _record_validation_stat(stats, "continuity_snap_count")
                 _log(
                     video_tag,
                     f"  ⚠️ [事件连续性] events[{i}].start={nxt_start_str} 早于 events[{last_valid_idx}].end={cur_end_str}，"
@@ -548,6 +684,7 @@ def _enforce_event_continuity(events: list, video_tag: str) -> None:
                 )
             else:
                 gap = nxt_start_sec - cur_end_sec
+                _record_validation_stat(stats, "continuity_snap_count")
                 _log(
                     video_tag,
                     f"  ⚠️ [事件连续性] events[{last_valid_idx}].end={cur_end_str} 与 events[{i}].start={nxt_start_str} "
@@ -562,6 +699,7 @@ def _enforce_event_continuity(events: list, video_tag: str) -> None:
                 f"  ⚠️ [事件连续性] events[{i}] 调整后 start>=end "
                 f"({nxt_start_sec:.2f}s >= {nxt_end_sec:.2f}s)，丢弃",
             )
+            _record_validation_stat(stats, "dropped_overlap_count")
             drop_indices.add(i)
         else:
             last_valid_idx = i
@@ -574,6 +712,7 @@ def _enforce_cross_chunk_continuity(
     current_events: list,
     prev_events: list,
     video_tag: str,
+    stats: Optional[dict] = None,
 ) -> None:
     """跨 chunk 兜底：若当前 chunk events[0] 起点早于上段末 event 终点，吸附或丢弃。
 
@@ -591,6 +730,7 @@ def _enforce_cross_chunk_continuity(
         start_sec = parse_timestamp_to_seconds(ev.get("start_time", ""))
         end_sec = parse_timestamp_to_seconds(ev.get("end_time", ""))
         if end_sec <= prev_end_sec + 0.01:
+            _record_validation_stat(stats, "dropped_overlap_count")
             _log(
                 video_tag,
                 f"  ⚠️ [跨段连续性] events[{idx}]={ev.get('start_time')}-{ev.get('end_time')} "
@@ -599,6 +739,7 @@ def _enforce_cross_chunk_continuity(
             drop_indices.append(idx)
             continue
         if start_sec < prev_end_sec - 0.01:
+            _record_validation_stat(stats, "cross_chunk_snap_count")
             _log(
                 video_tag,
                 f"  ⚠️ [跨段连续性] events[{idx}].start={ev.get('start_time')} 早于上段末 "
@@ -628,6 +769,10 @@ def _build_scene_whitelist(
             if chunk_start - 0.01 <= ts <= chunk_end + 0.01:
                 boundaries.add(round(float(ts), 3))
     return sorted(boundaries)
+
+
+def _format_pass1_timestamp(seconds: float, cfg: PipelineConfig) -> str:
+    return format_timestamp_for_mode(seconds, cfg.pass1_timestamp_mode)
 
 
 def _resume_from_progress(
@@ -665,6 +810,9 @@ def run_pass1(
     token_tracker: Optional[TokenTracker] = None,
     video_tag: str = "",
 ) -> str:
+    if cfg.pass1_timestamp_mode not in ("second", "millisecond"):
+        raise ValueError("cfg.pass1_timestamp_mode 必须是 'second' 或 'millisecond'")
+
     os.makedirs(run_dir, exist_ok=True)
     pass1_output_path = os.path.join(run_dir, "pass1_progress.json")
     temp_dir = os.path.join(run_dir, "_tmp")
@@ -763,7 +911,7 @@ def run_pass1(
             if not video_b64:
                 chunk_start = chunk_end
                 continue
-            frame_timestamps_str = [format_timestamp_sec(t) for t in valid_timestamps]
+            frame_timestamps_str = [_format_pass1_timestamp(t, cfg) for t in valid_timestamps]
             user_content.append({"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{video_b64}"}})
         else:
             target_timestamps = get_target_timestamps(
@@ -783,7 +931,7 @@ def run_pass1(
             if not base64_frames:
                 chunk_start = chunk_end
                 continue
-            frame_timestamps_str = [format_timestamp_sec(t) for t in valid_timestamps]
+            frame_timestamps_str = [_format_pass1_timestamp(t, cfg) for t in valid_timestamps]
             if 'qwen' in cfg.model_name:
                 for t_str, b64 in zip(valid_timestamps, base64_frames):
                     user_content.append({"type": "text", "text": f"<{t_str:.1f} seconds>"})
@@ -801,10 +949,13 @@ def run_pass1(
             boundaries_sec.update([chunk_start, chunk_end])
             if overlap_active and last_end_str:
                 boundaries_sec.add(parse_timestamp_to_seconds(last_end_str))
-            timestamps_str_list = sorted({format_timestamp_sec(round(float(t), 3)) for t in boundaries_sec})
+            timestamps_str_list = sorted(
+                {_format_pass1_timestamp(round(float(t), 3), cfg) for t in boundaries_sec},
+                key=parse_timestamp_to_seconds,
+            )
         else:
-            timestamps_str_list = sorted(set(frame_timestamps_str))
-            start_str = format_timestamp_sec(chunk_start)
+            timestamps_str_list = sorted(set(frame_timestamps_str), key=parse_timestamp_to_seconds)
+            start_str = _format_pass1_timestamp(chunk_start, cfg)
             if start_str not in timestamps_str_list:
                 timestamps_str_list.insert(0, start_str)
 
@@ -844,7 +995,7 @@ def run_pass1(
                 video_tag,
                 confidence_stats,
             )
-            _enforce_event_continuity(chunk_data.get("events", []), video_tag)
+            _enforce_event_continuity(chunk_data.get("events", []), video_tag, confidence_stats)
 
             _validate_revision_end_time(
                 chunk_data.get("prev_event_revision"),
@@ -863,8 +1014,9 @@ def run_pass1(
                 chunk_data.get("events", []),
                 prev_events_before,
                 video_tag,
+                confidence_stats,
             )
-            _enforce_event_continuity(chunk_data.get("events", []), video_tag)
+            _enforce_event_continuity(chunk_data.get("events", []), video_tag, confidence_stats)
 
             global_results.append({"chunk_time_range": chunk_name, "data": chunk_data})
 

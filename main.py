@@ -27,6 +27,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--scene-thresh", type=float, default=None, help="覆盖 scene_detect_threshold")
     p.add_argument("--frame-width", type=int, default=None, help="覆盖 frame_max_width")
     p.add_argument("--target-fps", type=float, default=None, help="覆盖 target_fps")
+    p.add_argument(
+        "--pass1-timestamp-mode",
+        choices=["second", "millisecond"],
+        default=None,
+        help="Pass1 给模型的 timestamp 白名单格式：second=hh:mm:ss，millisecond=hh:mm:ss.fff",
+    )
 
     p.add_argument("--conf-thresh", type=int, default=None, help="覆盖 pass2_confidence_threshold")
     return p
@@ -58,6 +64,8 @@ def main(argv=None) -> int:
         cfg.frame_max_width = args.frame_width
     if args.target_fps is not None:
         cfg.target_fps = args.target_fps
+    if args.pass1_timestamp_mode is not None:
+        cfg.pass1_timestamp_mode = args.pass1_timestamp_mode
 
     if args.conf_thresh is not None:
         cfg.pass2_confidence_threshold = args.conf_thresh

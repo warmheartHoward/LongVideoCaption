@@ -33,18 +33,18 @@ flowchart TB
     Pipe1 --> PerVideo
 
     subgraph Artifacts["磁盘产物 output/video/hyper_sig"]
-        F1["pass1_progress.json"]
+        F1["pass1_progress.json<br/>pass1_confidence.json"]
         F2["pass2_progress.json<br/>pass2_review_log.json"]
         F3["pass2_aligned.json<br/>pass2_global_bank.json"]
-        F4["pass3_final.json"]
+        F4["pass3_final.json<br/>pass3_confidence.json"]
         F5["stage2_refined.json"]
         F6["★ stage3_polished.json"]
     end
 
-    P1 -.->|"chunk 级增量写"| F1
+    P1 -.->|"chunk 级增量写 + 健康度报告"| F1
     P2 -.->|"Phase A、B 增量写"| F2
     P2 -.->|"Phase C 终产物"| F3
-    P3 -.->|"单次调用"| F4
+    P3 -.->|"单次调用 + 健康度报告"| F4
     S2 -.->|"per-event 增量写"| F5
     S3 -.->|"单次调用"| F6
 
@@ -63,7 +63,7 @@ flowchart TB
 flowchart TB
     Init(["video 入口<br/>整片跑一次 pyscenedetect<br/>得到全片 scene 列表"]) --> Loop{"chunk_start 小于 video_duration?"}
 
-    Loop -->|"yes"| Whitelist["从全片 scene 列表抽取<br/>落在 [chunk_start, chunk_end] 内的镜头切换点<br/>作为 timestamps_whitelist"]
+    Loop -->|"yes"| Whitelist["从全片 scene 列表抽取<br/>落在 [chunk_start, chunk_end] 内的镜头切换点<br/>并加入 chunk_start/chunk_end<br/>作为 timestamps_whitelist"]
     Whitelist --> Extract["抽帧<br/>scenedetect 复用全片结果 + get_base64_frames<br/>或 video_base64 整段"]
     Extract --> Build["拼 prompt<br/>sys + 前情提要 + 角色滚动史 + 帧序列 + 白名单"]
     Build --> LLM["LLM 多模态调用<br/>JSON 严格输出，event 起止必须取自白名单"]
@@ -77,13 +77,14 @@ flowchart TB
     Overlap --> Append
     Append --> Loop
 
-    Loop -->|"done"| Out(["pass1_progress.json<br/>chunks 数组、每个含 data.events 列表"])
+    Loop -->|"done"| Out(["pass1_progress.json<br/>chunks 数组、每个含 data.events 列表<br/>pass1_confidence.json"])
 ```
 
 **关键不变量**：
 - events **首尾相连**逐字相等（`events[i+1].start_time == events[i].end_time`），由 prompt 强制约束。
 - 整片只跑一次 `pyscenedetect.detect`（`frame_extractor.detect_scenes`），结果在所有 chunk 间复用 —— 避免 N× 重复扫描。
-- `timestamps_whitelist` 只包含**当前 chunk 内的镜头切换时间点**（来自全片 scene 列表的 start/end 边界），不强制塞入 `chunk_start`/`chunk_end`；当 chunk 内没有任何镜头切换点时，回落到 `[chunk_start, chunk_end]` 兜底白名单。
+- `timestamps_whitelist` 来自当前 chunk 内的镜头切换时间点，并显式包含 `chunk_start` / `chunk_end`；重叠接力时还会加入上一段 `last_end`，确保模型只能选择可校验的边界。
+- `pass1_confidence.json` 记录事件时间轴覆盖、相邻 event 连续性、后处理修补/丢弃统计、event 时长分布、内容缺失、关键帧越界和时间戳吸附偏移。
 
 ---
 
@@ -98,7 +99,7 @@ flowchart TB
         Compare --> Conf{"confidence ≥ pass2_confidence_threshold ?"}
         Conf -->|"是"| Merge["加入已有 cluster"]
         Conf -->|"否"| New["新建 cluster"]
-        Merge --> WriteA["pass2_progress.json<br/>pass2_bank_progress.json"]
+        Merge --> WriteA["pass2_progress.json"]
         New --> WriteA
     end
 
@@ -144,9 +145,9 @@ flowchart TB
 ...
 ```
 
-模型输出 chapters 切分后，本地 `_assemble_final` 按时间区间把 events 物理挂载到对应 chapter（浮点容差 `-0.5s`，最后一章 `+9999s` 兜底，越界事件追加为 `ev_fallback_*`）。
+模型输出 chapters 切分后，本地 `_validate_chapters` 会先把章节边界吸附到真实 event 边界、修正相邻章节 gap/overlap 并删除非法空章节；随后 `_assemble_final` 按章节时间区间把 events 物理挂载到对应 chapter，最后一章使用开放右边界兜底，越界事件追加为 `ev_fallback_*`。
 
-每次运行都会落 `_debug_pass3_input.txt` 与 `_debug_pass3_chapter_response.json` 用于排错。
+每次运行都会落 `_debug_pass3_input.txt` 与 `_debug_pass3_chapter_response.json` 用于排错，并生成 `pass3_confidence.json` 记录章节结构、时间有效性、边界吸附、event 挂载和章节分布。
 
 **`characters_in_event` 抽取**：从 `step3_synthesized_dense_caption` 用 `\[[^\[\]]+\]` 正则抓 `[xxx]`，并丢弃形如 `[00:04:41]` / `[3.14]` 这类纯数字/冒号/小数点构成的"伪角色"（即时间戳），避免把时间戳错当成角色名落到 `event.characters` 里。
 
@@ -286,12 +287,13 @@ python main.py \
 | `--api-key`       | OpenAI 兼容 API key                      | 空（必须传或改 config.py）   |
 | `--base-url`      | API base URL                             | 空（必须传或改 config.py）   |
 | `--model`         | 模型名                                   | `gemini-3.1-pro-preview`     |
-| `--chunk`         | `chunk_duration_sec`                     | `60`                         |
+| `--chunk`         | `chunk_duration_sec`                     | `90`                         |
 | `--payload`       | `image_list` / `video_base64`            | `image_list`                 |
-| `--max-frames`    | 每 chunk 最大帧数                        | `240`                        |
-| `--scene-thresh`  | scenedetect 阈值                         | `27.0`                       |
+| `--max-frames`    | 每 chunk 最大帧数                        | `360`                        |
+| `--scene-thresh`  | scenedetect 阈值                         | `15.0`                       |
 | `--frame-width`   | 帧宽（缩放上限）                         | `960`                        |
 | `--target-fps`    | video_base64 采样帧率                    | `1.0`                        |
+| `--pass1-timestamp-mode` | Pass 1 时间戳白名单格式：`second` / `millisecond` | `second`                     |
 | `--conf-thresh`   | Pass 2 身份对齐置信度拦截阈值            | `80`                         |
 
 进阶超参（Stage 2/3 的 fps、max_frames、temperature、max_tokens 等）在 `longvideocaption/config.py` 的 `PipelineConfig` 里改默认值。
@@ -306,14 +308,15 @@ python main.py \
 ├── _run_summary.json               # 每个视频的 success/failed + 产物路径
 │
 └── {video_basename}/
-    └── {hyper_sig}/                # 例: gemini-3.1-pro-preview__chk60s__image_list__mf240__sc27_0__fw960__ovlp0
+    └── {hyper_sig}/                # 例: gemini-3.1-pro-preview__chk90s__image_list__mf360__sc15_0__fw960__tssecond__ovlp0
         ├── pass1_progress.json     # Pass 1 事件流（chunk 级增量写）
-        ├── pass2_progress.json     # Pass 2 Phase A 断点（含 base64，跑完可删）
-        ├── pass2_bank_progress.json
+        ├── pass1_confidence.json   # Pass 1 健康度报告：覆盖/连续性/修补/内容完整度
+        ├── pass2_progress.json     # Pass 2 Phase A 断点（global_bank/chunk_mappings/低置信标记）
         ├── pass2_review_log.json   # Pass 2 Phase B 终审日志
         ├── pass2_aligned.json      # Pass 2 终产物：身份对齐后的事件流
         ├── pass2_global_bank.json  # 全局角色图鉴（lite，含名字 + 外貌）
         ├── pass3_final.json        # Pass 3 终产物：层级章节 JSON
+        ├── pass3_confidence.json   # Pass 3 健康度报告：章节边界/挂载/分布
         ├── _debug_pass3_input.txt        # Pass 3 实际喂给模型的完整 prompt
         ├── _debug_pass3_chapter_response.json  # Pass 3 模型原始返回
         ├── stage2_refined.json     # Stage 2 终产物：每 event 多 frame_caption
@@ -353,6 +356,26 @@ python main.py \
   ]
 }
 ```
+
+---
+
+## Confidence 健康度报告
+
+详细字段解释见 [confidence.md](confidence.md)。当前会随视频运行目录生成两份报告：
+
+| 文件 | 关注点 | 典型用途 |
+|------|--------|----------|
+| `pass1_confidence.json` | event 时间覆盖、相邻连续性、时间戳吸附、后处理修补/丢弃、event 时长分布、内容缺失、关键帧越界 | 判断 Pass 1 的事件切分是否完整、是否靠大量修补才变得连续 |
+| `pass3_confidence.json` | LLM 章节结构、无效章节时间、章节边界吸附、未挂载事件、章节 event 分布 | 判断章节切分和 event 挂载是否稳定可靠 |
+
+几个高信号字段：
+
+- `pass1_confidence.event_time_coverage.is_fully_covered`：是否完整覆盖整片时间轴。
+- `pass1_confidence.event_time_continuity.adjacency_break_count`：相邻 event 是否仍存在 gap/overlap。
+- `pass1_confidence.event_validation_summary`：Pass 1 为修平时间轴做了多少交换、吸附和丢弃。
+- `pass1_confidence.timestamp_calibration.large_abs_delta_sum_sec`：模型时间戳被吸附到白名单时的大偏移绝对值总和。
+- `pass3_confidence.chapter_boundary_calibration.total_abs_snap_delta_sec`：章节边界被吸附到 event 边界的绝对偏移总和。
+- `pass3_confidence.event_mounting.unbound_event_count`：未能自然落入章节、最终被追加到末章的 event 数量。
 
 ---
 

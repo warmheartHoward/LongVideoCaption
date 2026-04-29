@@ -21,6 +21,7 @@ class PipelineConfig:
     frame_max_width: int = 960
     max_total_pixels: int = 128 * 1024 * 32 * 32
     frame_jpg_quality: int = 95
+    pass1_timestamp_mode: str = "second"  # second 或 millisecond
     llm_temperature: float = 0.2
     llm_max_tokens: int = 32768
     prev_event_overlap_count: int = 0
@@ -74,5 +75,6 @@ def hyper_signature(cfg: PipelineConfig) -> str:
         f"__mf{cfg.max_frames_per_chunk}"
         f"__sc{scene}"
         f"__fw{cfg.frame_max_width}"
+        f"__ts{cfg.pass1_timestamp_mode}"
         f"__ovlp{cfg.prev_event_overlap_count}"
     )
