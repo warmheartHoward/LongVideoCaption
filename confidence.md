@@ -137,3 +137,56 @@
 - `dominant_chapter_event_ratio`：event 数最多的章节占全部输入 event 的比例。
 
 `dominant_chapter_event_ratio` 较高不一定代表错误，但可能说明章节切分不均衡，大部分视频内容被压进了同一个章节。
+
+## stage3_confidence
+
+`stage3_confidence` 会写入 `stage3_polished.json` 的顶层字段。它是 Stage 3 全局润色阶段的结构一致性报告，用来检查 LLM 返回的章节和 event 是否与输入 payload 保持一致，以及最终有多少 event 成功使用了润色结果。
+
+Stage 3 的输入 payload 来自 `stage2_refined.json` 中有可用 caption 的 event。caption 优先使用 `frame_caption`，没有时回退到 `step3_synthesized_dense_caption`。因此这里的输入数量指“送入 Stage 3 LLM 的 chapter/event 数量”，不一定等于 `stage2_refined.json` 中所有 event 的总数。
+
+### 顶层字段
+
+- `ok`：Stage 3 结构校验是否完全通过。需要章节数量、event 数量、chapter id/title、event id 全部一致，并且输出 caption 不为空。
+- `skipped`：是否跳过了 Stage 3 LLM 调用。仅在没有可润色 event 时出现。
+- `skip_reason`：跳过原因。当前可能值为 `no_caption_events`。
+
+### 数量一致性
+
+检查 LLM 输出和 Stage 3 输入 payload 的 chapter/event 数量是否一致。
+
+- `chapter_count_matches`：输出 chapter 数量是否等于输入 chapter 数量。
+- `event_count_matches`：输出 event 总数是否等于输入 event 总数。
+- `input_chapter_count`：送入 Stage 3 LLM 的 chapter 数量。
+- `output_chapter_count`：LLM 返回的 chapter 数量。
+- `input_event_count`：送入 Stage 3 LLM 的 event 数量。
+- `output_event_count`：LLM 返回的 event 数量。
+
+### ID 与标题一致性
+
+检查 LLM 是否保持了输入结构中的章节标识、章节标题和事件标识。
+
+- `chapter_id_title_matches`：每个输出 chapter 的 `chapter_id` 和 `chapter_title` 是否与同位置输入 chapter 一致。
+- `event_id_matches`：每个输出 event 的 `event_id` 是否与同位置输入 event 一致，并且没有缺失或额外 event。
+- `chapter_mismatches`：chapter 不一致明细，包含 chapter 下标、期望/实际 `chapter_id` 和期望/实际标题。
+- `event_mismatches`：event id 不一致明细，包含 chapter/event 下标、chapter id、期望 event id 和实际 event id。
+- `missing_events`：输入中存在但输出中缺失的 event 明细。
+- `extra_events`：输出中多出来的 event 明细。
+
+### 润色覆盖情况
+
+统计最终有多少 event 实际使用了 LLM 的 Stage 3 润色文本。
+
+- `polished_event_count`：输出中成功匹配到 `(chapter_id, event_id)` 且 caption 非空的 event 数量。
+- `fallback_event_count`：未成功使用 Stage 3 润色结果、最终回退到 `frame_caption` 或 `step3_synthesized_dense_caption` 的 event 数量。
+- `empty_caption_events`：LLM 输出中 caption 为空的 event 明细。
+
+如果 `fallback_event_count > 0`，说明部分 event 没有拿到有效的 Stage 3 润色结果；最终 caption 仍可用，但需要检查是否是模型漏回、id 变化或空 caption 导致。
+
+### 重复键检查
+
+Stage 3 使用 `(chapter_id, event_id)` 作为回填键，避免不同章节里相同 event id 互相串写。
+
+- `duplicate_input_event_keys`：输入 payload 中重复的 `(chapter_id, event_id)`。
+- `duplicate_output_event_keys`：LLM 输出中重复的 `(chapter_id, event_id)`。
+
+如果出现重复键，后续回填可能无法区分同一 chapter 内的同名 event，需要检查上游 event id 生成逻辑。
