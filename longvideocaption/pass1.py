@@ -765,31 +765,17 @@ def run_pass1(
         # event 起止白名单：scenedetect 模式仅使用本 chunk 内的镜头切换点；
         # 其它模式保持原有行为（抽帧时间戳 + chunk_start 兜底）。
         if precomputed_scenes is not None:
-            boundaries_sec = _build_scene_whitelist(precomputed_scenes, chunk_start, chunk_end)
-            if not boundaries_sec:
-                _log(
-                    video_tag,
-                    f"⚠️ [pyscenedetect] 本段无镜头切换点，回落到 [chunk_start, chunk_end] 兜底白名单。",
-                )
-                boundaries_sec = [chunk_start, chunk_end]
-            timestamps_str_list = sorted({format_timestamp_sec(t) for t in boundaries_sec})
-            _log(
-                video_tag,
-                f"🎬 [白名单] 本段镜头切换点 {len(timestamps_str_list)} 个: {timestamps_str_list}",
-            )
-        else:
-            timestamps_str_list = sorted(set(frame_timestamps_str))
-            start_str = format_timestamp_sec(chunk_start)
-            if start_str not in timestamps_str_list:
-                timestamps_str_list.insert(0, start_str)
-
-        if precomputed_scenes is not None:
             scene_boundaries_sec = _build_scene_whitelist(precomputed_scenes, chunk_start, chunk_end)
             boundaries_sec = set(scene_boundaries_sec)
             boundaries_sec.update([chunk_start, chunk_end])
             if overlap_active and last_end_str:
                 boundaries_sec.add(parse_timestamp_to_seconds(last_end_str))
             timestamps_str_list = sorted({format_timestamp_sec(round(float(t), 3)) for t in boundaries_sec})
+        else:
+            timestamps_str_list = sorted(set(frame_timestamps_str))
+            start_str = format_timestamp_sec(chunk_start)
+            if start_str not in timestamps_str_list:
+                timestamps_str_list.insert(0, start_str)
 
         timestamps_str = ", ".join(timestamps_str_list)
 

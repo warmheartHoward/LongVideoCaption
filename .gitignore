@@ -1,0 +1,64 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# IDE and editor files
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/
+
+# Project runtime outputs
+_tmp*/
+tmp/
+temp/
+outputs/
+output/
+runs/
+results/
+artifacts/
+
+# Generated media and large local assets
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.webm
+*.flv
+*.wav
+*.mp3
+*.jpg
+*.jpeg
+*.png
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
