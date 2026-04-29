@@ -446,13 +446,14 @@ def _build_scene_whitelist(
     chunk_start: float,
     chunk_end: float,
 ) -> list:
-    """从全片 scene 列表里提取落在 [chunk_start, chunk_end] 内的镜头切换时间点（秒）。
+    """从全片 scene 列表里提取落在 [chunk_start, chunk_end] 内的镜头切换时间点（秒），
+    并显式加入 chunk_start / chunk_end 作为兜底锚点。
 
     pyscenedetect 返回的 scene = (s_start, s_end)，相邻 scene 的 s_end / s_start 重合，
-    set 去重后即为该 chunk 内的镜头切换点集合。完全由 scenedetect 决定，**不强加
-    chunk_start / chunk_end**。模型只能在这些镜头切换点中选取 event 起止时间。
+    set 去重后即为该 chunk 内的镜头切换点集合。chunk 边界**始终入选**，确保模型在
+    chunk 头尾没有镜头切换时也能用 chunk_start / chunk_end 作为 event 起止时间。
     """
-    boundaries: set = set()
+    boundaries: set = {round(float(chunk_start), 3), round(float(chunk_end), 3)}
     for s_start_raw, s_end_raw in precomputed_scenes:
         for ts in (s_start_raw, s_end_raw):
             if chunk_start - 0.01 <= ts <= chunk_end + 0.01:
@@ -605,20 +606,14 @@ def run_pass1(
                 user_content.append({"type": "text", "text": f"画面时间 {t_str}:"})
                 user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"}})
 
-        # event 起止白名单：scenedetect 模式仅使用本 chunk 内的镜头切换点；
+        # event 起止白名单：scenedetect 模式 = chunk 内的镜头切换点 + chunk_start/chunk_end 兜底；
         # 其它模式保持原有行为（抽帧时间戳 + chunk_start 兜底）。
         if precomputed_scenes is not None:
             boundaries_sec = _build_scene_whitelist(precomputed_scenes, chunk_start, chunk_end)
-            if not boundaries_sec:
-                _log(
-                    video_tag,
-                    f"⚠️ [pyscenedetect] 本段无镜头切换点，回落到 [chunk_start, chunk_end] 兜底白名单。",
-                )
-                boundaries_sec = [chunk_start, chunk_end]
             timestamps_str_list = sorted({format_timestamp_sec(t) for t in boundaries_sec})
             _log(
                 video_tag,
-                f"🎬 [白名单] 本段镜头切换点 {len(timestamps_str_list)} 个: {timestamps_str_list}",
+                f"🎬 [白名单] 本段镜头切换点 {len(timestamps_str_list)} 个 (含 chunk 边界): {timestamps_str_list}",
             )
         else:
             timestamps_str_list = sorted(set(frame_timestamps_str))

@@ -83,7 +83,7 @@ flowchart TB
 **关键不变量**：
 - events **首尾相连**逐字相等（`events[i+1].start_time == events[i].end_time`），由 prompt 强制约束。
 - 整片只跑一次 `pyscenedetect.detect`（`frame_extractor.detect_scenes`），结果在所有 chunk 间复用 —— 避免 N× 重复扫描。
-- `timestamps_whitelist` 只包含**当前 chunk 内的镜头切换时间点**（来自全片 scene 列表的 start/end 边界），不强制塞入 `chunk_start`/`chunk_end`；当 chunk 内没有任何镜头切换点时，回落到 `[chunk_start, chunk_end]` 兜底白名单。
+- `timestamps_whitelist` = **当前 chunk 内的镜头切换时间点**（来自全片 scene 列表的 start/end 边界）**+ `chunk_start` / `chunk_end` 边界锚点**；chunk 边界始终入选，确保 chunk 头尾无镜头切换时模型也能取到合法的 event 起止时间，且 event 链能严丝合缝覆盖整段 chunk。
 
 ---
 
@@ -235,6 +235,12 @@ LongVideoCaption_v2/
 ---
 
 ## 依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+或手动安装：
 
 ```bash
 pip install openai httpx opencv-python numpy scenedetect
