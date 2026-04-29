@@ -7,6 +7,7 @@ from .config import PipelineConfig
 from .frame_extractor import (
     detect_scenes,
     get_base64_frames,
+    get_base64_frames_qwen,
     get_raw_chunk_video_base64,
     get_target_timestamps,
     get_video_duration,
@@ -656,6 +657,9 @@ def run_pass1(
     history_summaries = []
     previous_context = "无前情提要，这是视频的开篇。"
 
+    overlap_active = False
+    last_end_str = ""
+
     if os.path.exists(pass1_output_path):
         try:
             with open(pass1_output_path, 'r', encoding='utf-8') as f:
@@ -737,16 +741,26 @@ def run_pass1(
                 log_prefix=f"[{video_tag}] " if video_tag else "",
                 precomputed_scenes=precomputed_scenes,
             )
-            valid_timestamps, base64_frames = get_base64_frames(
-                video_path, target_timestamps, cfg.frame_max_width, cfg.frame_jpg_quality,
-            )
+            if 'qwen' in cfg.model_name:
+                valid_timestamps, base64_frames = get_base64_frames_qwen(
+                    video_path, target_timestamps, cfg.max_total_pixels, cfg.frame_jpg_quality,
+                )
+            else:
+                valid_timestamps, base64_frames = get_base64_frames(
+                    video_path, target_timestamps, cfg.frame_max_width, cfg.frame_jpg_quality,
+                )
             if not base64_frames:
                 chunk_start = chunk_end
                 continue
             frame_timestamps_str = [format_timestamp_sec(t) for t in valid_timestamps]
-            for t_str, b64 in zip(frame_timestamps_str, base64_frames):
-                user_content.append({"type": "text", "text": f"画面时间 {t_str}:"})
-                user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"}})
+            if 'qwen' in cfg.model_name:
+                for t_str, b64 in zip(valid_timestamps, base64_frames):
+                    user_content.append({"type": "text", "text": f"<{t_str:.1f} seconds>"})
+                    user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+            else:
+                for t_str, b64 in zip(frame_timestamps_str, base64_frames):
+                    user_content.append({"type": "text", "text": f"画面时间 {t_str}:"})
+                    user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"}})
 
         # event 起止白名单：scenedetect 模式仅使用本 chunk 内的镜头切换点；
         # 其它模式保持原有行为（抽帧时间戳 + chunk_start 兜底）。
@@ -768,6 +782,14 @@ def run_pass1(
             start_str = format_timestamp_sec(chunk_start)
             if start_str not in timestamps_str_list:
                 timestamps_str_list.insert(0, start_str)
+
+        if precomputed_scenes is not None:
+            scene_boundaries_sec = _build_scene_whitelist(precomputed_scenes, chunk_start, chunk_end)
+            boundaries_sec = set(scene_boundaries_sec)
+            boundaries_sec.update([chunk_start, chunk_end])
+            if overlap_active and last_end_str:
+                boundaries_sec.add(parse_timestamp_to_seconds(last_end_str))
+            timestamps_str_list = sorted({format_timestamp_sec(round(float(t), 3)) for t in boundaries_sec})
 
         timestamps_str = ", ".join(timestamps_str_list)
 

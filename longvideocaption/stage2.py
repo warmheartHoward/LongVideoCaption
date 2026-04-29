@@ -11,7 +11,7 @@ import os
 from typing import List
 
 from .config import PipelineConfig
-from .frame_extractor import get_event_frames_base64
+from .frame_extractor import get_event_frames_base64, get_event_frames_base64_qwen
 from .llm_client import request_llm_text_with_retry
 from .prompts.stage2_v1 import SYS_PROMPT_STAGE2, build_stage2_user_prompt
 from .token_tracker import TokenTracker
@@ -137,16 +137,27 @@ def run_stage2(
         actual_start_sec = start_sec
         if adjust_start and start_sec > 0:
             actual_start_sec = min(start_sec + cfg.stage2_adjust_start_offset, max(start_sec, end_sec - 0.01))
-
-        timestamps, base64_frames = get_event_frames_base64(
-            video_path=video_path,
-            start_sec=actual_start_sec,
-            end_sec=end_sec,
-            fps=cfg.stage2_fps,
-            max_frames=cfg.stage2_max_frames,
-            max_width=cfg.stage2_frame_max_width,
-            jpg_quality=cfg.stage2_frame_jpg_quality,
-        )
+        
+        if 'qwen' in cfg.model_name:
+            timestamps, base64_frames = get_event_frames_base64_qwen(
+                video_path=video_path,
+                start_sec=actual_start_sec,
+                end_sec=end_sec,
+                fps=cfg.stage2_fps,
+                max_frames=cfg.stage2_max_frames,
+                max_total_pixels=cfg.stage2_max_total_pixels,
+                jpg_quality=cfg.stage2_frame_jpg_quality,
+            )
+        else:
+            timestamps, base64_frames = get_event_frames_base64(
+                video_path=video_path,
+                start_sec=actual_start_sec,
+                end_sec=end_sec,
+                fps=cfg.stage2_fps,
+                max_frames=cfg.stage2_max_frames,
+                max_width=cfg.stage2_frame_max_width,
+                jpg_quality=cfg.stage2_frame_jpg_quality,
+            )
 
         if not base64_frames:
             _log(video_tag, f"  ⚠️ [{event_id}] 抽帧失败 ({actual_start_sec:.2f}s → {end_sec:.2f}s)，跳过。")

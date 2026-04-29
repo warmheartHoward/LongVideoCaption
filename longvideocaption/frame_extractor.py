@@ -2,7 +2,7 @@ import base64
 import os
 import time
 from typing import List, Optional, Tuple
-
+import math
 import cv2
 import numpy as np
 
@@ -58,10 +58,72 @@ def get_target_timestamps(
             if alloc == 1:
                 timestamps.append(s_start + duration / 2.0)
             elif alloc > 1:
-                timestamps.extend(np.linspace(s_start, s_end, alloc + 2)[1:-1].tolist())
+                timestamps.extend(np.linspace(s_start, s_end, alloc, endpoint=False).tolist())
         return sorted(list(set(timestamps)))
     else:
-        return np.linspace(chunk_start, chunk_end, max_frames).tolist()
+        return np.linspace(chunk_start, chunk_end, max_frames, endpoint=False).tolist()
+
+def smart_resize(
+    num_frames: int,
+    height: int,
+    width: int,
+    temporal_factor: int = 2,
+    factor: int = 32,
+    min_pixels: int = 128 * 128,
+    max_pixels: int = 16 * 16 * 2 * 2 * 2 * 6144,
+):
+    if num_frames < temporal_factor:
+        raise ValueError(f"t:{num_frames} must be larger than temporal_factor:{temporal_factor}")
+    if height < factor or width < factor:
+        raise ValueError(f"height:{height} or width:{width} must be larger than factor:{factor}")
+    elif max(height, width) / min(height, width) > 200:
+        raise ValueError(
+            f"absolute aspect ratio must be smaller than 200, got {max(height, width) / min(height, width)}"
+        )
+    h_bar = round(height / factor) * factor
+    w_bar = round(width / factor) * factor
+    t_bar = round(num_frames / temporal_factor) * temporal_factor
+
+    if t_bar * h_bar * w_bar > max_pixels:
+        beta = math.sqrt((num_frames * height * width) / max_pixels)
+        h_bar = max(factor, math.floor(height / beta / factor) * factor)
+        w_bar = max(factor, math.floor(width / beta / factor) * factor)
+    elif t_bar * h_bar * w_bar < min_pixels:
+        beta = math.sqrt(min_pixels / (num_frames * height * width))
+        h_bar = math.ceil(height * beta / factor) * factor
+        w_bar = math.ceil(width * beta / factor) * factor
+
+    return h_bar, w_bar
+
+
+def get_base64_frames_qwen(
+    video_path: str,
+    target_timestamps: List[float],
+    max_total_pixels: int,
+    jpg_quality: int,
+) -> Tuple[List[float], List[str]]:
+    cap = cv2.VideoCapture(video_path)
+    orig_fps = cap.get(cv2.CAP_PROP_FPS)
+    orig_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    orig_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+
+    max_pixels_per_frame = 640 * 32 * 32
+    actual_frame_count = len(target_timestamps)
+    max_total_pixels = min(max_total_pixels, actual_frame_count * max_pixels_per_frame)
+    target_h, target_w = smart_resize(actual_frame_count, orig_height, orig_width, max_pixels=max_total_pixels)
+
+    valid_timestamps: List[float] = []
+    base64_frames: List[str] = []
+    for t in target_timestamps:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(t * orig_fps))
+        ret, frame = cap.read()
+        if ret:
+            resized = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+            _, buffer = cv2.imencode('.jpg', resized, [int(cv2.IMWRITE_JPEG_QUALITY), jpg_quality])
+            base64_frames.append(base64.b64encode(buffer).decode('utf-8'))
+            valid_timestamps.append(t)
+    cap.release()
+    return valid_timestamps, base64_frames
 
 
 def get_base64_frames(
@@ -164,9 +226,33 @@ def get_event_frames_base64(
     if n_frames == 1:
         timestamps = [start_sec + duration / 2.0]
     else:
-        timestamps = np.linspace(start_sec, end_sec, n_frames + 2)[1:-1].tolist()
+        timestamps = np.linspace(start_sec, end_sec, n_frames, endpoint=False).tolist()
 
     return get_base64_frames(video_path, timestamps, max_width, jpg_quality)
+
+
+def get_event_frames_base64_qwen(
+    video_path: str,
+    start_sec: float,
+    end_sec: float,
+    fps: float,
+    max_frames: int,
+    max_total_pixels: int,
+    jpg_quality: int,
+) -> Tuple[List[float], List[str]]:
+    if end_sec <= start_sec:
+        return [], []
+
+    duration = end_sec - start_sec
+    n_by_fps = max(1, int(round(duration * max(fps, 1e-6))))
+    n_frames = min(n_by_fps, max(1, max_frames))
+
+    if n_frames == 1:
+        timestamps = [start_sec + duration / 2.0]
+    else:
+        timestamps = np.linspace(start_sec, end_sec, n_frames, endpoint=False).tolist()
+
+    return get_base64_frames_qwen(video_path, timestamps, max_total_pixels, jpg_quality)
 
 
 def extract_single_frame_base64(video_path: str, timestamp_str: str, max_width=960, jpg_quality: int = 90) -> str:
