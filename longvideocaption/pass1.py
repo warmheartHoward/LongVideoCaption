@@ -151,12 +151,21 @@ def _pick_next_start(
     return proposed, last_end_str, last_action, True, k
 
 
+def _record_large_snap_delta(stats: Optional[dict], delta: float, label: str) -> None:
+    if stats is None or delta <= 1.0:
+        return
+    stats["large_snap_delta_sum"] = round(float(stats.get("large_snap_delta_sum", 0.0)) + float(delta), 3)
+    details = stats.setdefault("large_snap_deltas", [])
+    details.append({"label": label, "delta_sec": round(float(delta), 3)})
+
+
 def _validate_and_snap_event_times(
     events: list,
     whitelist_str_list: list,
     chunk_start: float,
     chunk_end: float,
     video_tag: str,
+    stats: Optional[dict] = None,
 ) -> None:
     """就地校验 events 的 start_time/end_time，把非白名单值 snap 到最近的合法项。
 
@@ -180,6 +189,7 @@ def _validate_and_snap_event_times(
                 return wl_str, wl_sec
         nearest_str, nearest_sec = min(sorted_items, key=lambda p: abs(p[1] - target))
         delta = abs(nearest_sec - target)
+        _record_large_snap_delta(stats, delta, label)
         _log(video_tag, f"  ⚠️ [时间戳校准] {label}={ts_str} → {nearest_str} (Δ={delta:.2f}s)")
         return nearest_str, nearest_sec
 
@@ -237,7 +247,12 @@ def _validate_and_snap_event_times(
         events.pop(di)
 
 
-def _validate_revision_end_time(revision, whitelist_str_list: list, video_tag: str) -> None:
+def _validate_revision_end_time(
+    revision,
+    whitelist_str_list: list,
+    video_tag: str,
+    stats: Optional[dict] = None,
+) -> None:
     """校验 prev_event_revision.end_time 是否在白名单（按秒数比对，容差 0.01s）。"""
     if not isinstance(revision, dict) or not revision.get("need_merge"):
         return
@@ -256,8 +271,134 @@ def _validate_revision_end_time(revision, whitelist_str_list: list, video_tag: s
 
     nearest_str, nearest_sec = min(whitelist_map.items(), key=lambda p: abs(p[1] - target))
     delta = abs(nearest_sec - target)
+    _record_large_snap_delta(stats, delta, "prev_event_revision.end_time")
     _log(video_tag, f"  ⚠️ [时间戳校准] revision.end={end_str} → {nearest_str} (Δ={delta:.2f}s)")
     revision["end_time"] = nearest_str
+
+
+def _flatten_events(global_results: list) -> list:
+    flat = []
+    for chunk_idx, chunk in enumerate(global_results):
+        chunk_range = chunk.get("chunk_time_range", "")
+        for event_idx, ev in enumerate(chunk.get("data", {}).get("events", []) or []):
+            start_sec = parse_timestamp_to_seconds(ev.get("start_time", ""))
+            end_sec = parse_timestamp_to_seconds(ev.get("end_time", ""))
+            flat.append({
+                "chunk_index": chunk_idx,
+                "event_index": event_idx,
+                "chunk_time_range": chunk_range,
+                "start_time": ev.get("start_time", ""),
+                "end_time": ev.get("end_time", ""),
+                "start_sec": start_sec,
+                "end_sec": end_sec,
+                "key_frame_times": ev.get("key_frame_times", []) or [],
+            })
+    flat.sort(key=lambda item: (item["start_sec"], item["end_sec"]))
+    return flat
+
+
+def _compute_pass1_confidence(global_results: list, total_duration: float, stats: Optional[dict] = None) -> dict:
+    flat_events = _flatten_events(global_results)
+    gap_segments = []
+    cursor = 0.0
+    eps = 0.01
+
+    for item in flat_events:
+        start_sec = item["start_sec"]
+        end_sec = item["end_sec"]
+        if end_sec <= cursor + eps:
+            cursor = max(cursor, end_sec)
+            continue
+        if start_sec > cursor + eps:
+            gap_segments.append({
+                "start_time": format_timestamp(cursor),
+                "end_time": format_timestamp(start_sec),
+                "gap_sec": round(start_sec - cursor, 3),
+            })
+        cursor = max(cursor, end_sec)
+
+    if total_duration > cursor + eps:
+        gap_segments.append({
+            "start_time": format_timestamp(cursor),
+            "end_time": format_timestamp(total_duration),
+            "gap_sec": round(total_duration - cursor, 3),
+        })
+
+    invalid_key_frames = []
+    total_key_frames = 0
+    invalid_key_frames_count = 0
+    for item in flat_events:
+        start_sec = item["start_sec"]
+        end_sec = item["end_sec"]
+        for kft in item["key_frame_times"]:
+            if not isinstance(kft, str):
+                continue
+            total_key_frames += 1
+            kft_sec = parse_timestamp_to_seconds(kft)
+            if start_sec - 0.1 <= kft_sec <= end_sec + 0.1:
+                continue
+            invalid_key_frames_count += 1
+            invalid_key_frames.append({
+                "chunk_index": item["chunk_index"],
+                "event_index": item["event_index"],
+                "event_range": f"{item['start_time']} - {item['end_time']}",
+                "key_frame_time": kft,
+            })
+
+    large_delta_sum = round(float((stats or {}).get("large_snap_delta_sum", 0.0) or 0.0), 3)
+    return {
+        "video_duration_sec": round(float(total_duration), 3),
+        "event_count": len(flat_events),
+        "event_time_coverage": {
+            "is_fully_covered": len(gap_segments) == 0,
+            "gap_count": len(gap_segments),
+            "total_gap_sec": round(sum(seg["gap_sec"] for seg in gap_segments), 3),
+            "gaps": gap_segments,
+        },
+        "key_frame_time_validity": {
+            "total_key_frame_times": total_key_frames,
+            "invalid_count": invalid_key_frames_count,
+            "all_within_event_ranges": invalid_key_frames_count == 0,
+            "invalid_items": invalid_key_frames,
+        },
+        "timestamp_calibration": {
+            "large_delta_threshold_sec": 1.0,
+            "large_delta_sum_sec": large_delta_sum,
+            "large_delta_count": len((stats or {}).get("large_snap_deltas", [])),
+            "large_deltas": list((stats or {}).get("large_snap_deltas", [])),
+        },
+    }
+
+
+def _write_pass1_confidence(
+    run_dir: str,
+    global_results: list,
+    total_duration: float,
+    stats: Optional[dict],
+) -> str:
+    confidence_path = os.path.join(run_dir, "pass1_confidence.json")
+    payload = _compute_pass1_confidence(global_results, total_duration, stats)
+    with open(confidence_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return confidence_path
+
+
+def _load_existing_confidence_stats(run_dir: str) -> dict:
+    confidence_path = os.path.join(run_dir, "pass1_confidence.json")
+    default = {"large_snap_delta_sum": 0.0, "large_snap_deltas": []}
+    if not os.path.exists(confidence_path):
+        return default
+    try:
+        with open(confidence_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        calibration = payload.get("timestamp_calibration", {}) or {}
+        details = calibration.get("large_deltas", []) or []
+        return {
+            "large_snap_delta_sum": float(calibration.get("large_delta_sum_sec", 0.0) or 0.0),
+            "large_snap_deltas": list(details),
+        }
+    except Exception:
+        return default
 
 
 def _apply_prev_event_revision(chunk_data: dict, global_results: list, video_tag: str) -> None:
@@ -495,6 +636,7 @@ def run_pass1(
     os.makedirs(run_dir, exist_ok=True)
     pass1_output_path = os.path.join(run_dir, "pass1_progress.json")
     temp_dir = os.path.join(run_dir, "_tmp")
+    confidence_stats = _load_existing_confidence_stats(run_dir)
 
     _log_context.log_file = os.path.join(run_dir, "pass1.log")
 
@@ -534,6 +676,7 @@ def run_pass1(
                         f"✅ 检测到 Pass 1 历史产物已覆盖到视频末尾 "
                         f"({format_timestamp(total_duration)})，跳过 Pass 1。",
                     )
+                    _write_pass1_confidence(run_dir, global_results, total_duration, confidence_stats)
                     return pass1_output_path
 
                 _log(video_tag, "\n=========================================")
@@ -660,6 +803,7 @@ def run_pass1(
                 timestamps_str_list,
                 chunk_start, chunk_end,
                 video_tag,
+                confidence_stats,
             )
             _enforce_event_continuity(chunk_data.get("events", []), video_tag)
 
@@ -667,6 +811,7 @@ def run_pass1(
                 chunk_data.get("prev_event_revision"),
                 timestamps_str_list,
                 video_tag,
+                confidence_stats,
             )
 
             prev_events_before = (
@@ -686,6 +831,7 @@ def run_pass1(
 
             with open(pass1_output_path, 'w', encoding='utf-8') as f:
                 json.dump(global_results, f, ensure_ascii=False, indent=2)
+            _write_pass1_confidence(run_dir, global_results, total_duration, confidence_stats)
 
             events = chunk_data.get("events", [])
 
@@ -712,11 +858,12 @@ def run_pass1(
                 else:
                     last_ev = events[-1]
                     last_action = last_ev.get("step3_synthesized_dense_caption", "")
+                    last_end_str = last_ev.get("end_time", "")
                     _log(video_tag, f"⚠️ [接力异常] 末尾时间不合理，启动 80% 安全重叠兜底推进。")
                     accumulated_story = "\n".join(history_summaries) if history_summaries else "暂无"
                     previous_context = (
                         f"【全局剧情脉络】:\n{accumulated_story}\n\n"
-                        f"【当前无缝接力要求】: 上一幕的最后一个事件是：'{last_action}'，结束于 {format_timestamp(next_start)}。"
+                        f"【当前无缝接力要求】: 上一幕的最后一个事件是：'{last_action}'，结束于 {format_timestamp(last_end_str)}。"
                         f"请紧接着这个动作和时间点继续描述。"
                     )
             else:
@@ -735,4 +882,5 @@ def run_pass1(
 
         chunk_start = next_start
 
+    _write_pass1_confidence(run_dir, global_results, total_duration, confidence_stats)
     return pass1_output_path
