@@ -12,6 +12,7 @@ from .utils import parse_timestamp_to_seconds
 PASS_NAME = "pass3_aggregation"
 
 _ROLE_PATTERN = re.compile(r'\[[^\[\]]+\]')
+_TIMESTAMP_LIKE = re.compile(r'^[\d:.\s]+$')
 
 
 def _log(video_tag: str, msg: str) -> None:
@@ -23,6 +24,9 @@ def _extract_event_characters(step3_text: str, name_to_desc: dict) -> list:
         return []
     seen = []
     for name in _ROLE_PATTERN.findall(step3_text):
+        inner = name[1:-1]
+        if _TIMESTAMP_LIKE.match(inner):
+            continue
         if name not in seen:
             seen.append(name)
     return [{"name": n, "desc": name_to_desc.get(n, "")} for n in seen]

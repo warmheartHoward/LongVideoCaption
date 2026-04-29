@@ -1,12 +1,20 @@
 import base64
 import os
 import time
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
 
 from .utils import format_timestamp
+
+
+def detect_scenes(video_path: str, threshold: float) -> List[Tuple[float, float]]:
+    """整片跑一次 pyscenedetect，返回 [(s_start_sec, s_end_sec), ...]。"""
+    from scenedetect import detect, ContentDetector
+
+    raw = detect(video_path, ContentDetector(threshold=threshold))
+    return [(scene[0].get_seconds(), scene[1].get_seconds()) for scene in raw]
 
 
 def get_target_timestamps(
@@ -17,16 +25,19 @@ def get_target_timestamps(
     threshold: float,
     max_frames: int,
     log_prefix: str = "",
+    precomputed_scenes: Optional[List[Tuple[float, float]]] = None,
 ) -> List[float]:
     print(f"\n{log_prefix}[序列构建] 分析 {format_timestamp(chunk_start)} 到 {format_timestamp(chunk_end)}。策略: {strategy}")
     if strategy == "scenedetect":
-        from scenedetect import detect, ContentDetector
+        if precomputed_scenes is None:
+            scene_list_raw = detect_scenes(video_path, threshold)
+        else:
+            scene_list_raw = precomputed_scenes
 
-        scene_list = detect(video_path, ContentDetector(threshold=threshold))
         valid_scenes = []
-        for scene in scene_list:
-            s_start = max(scene[0].get_seconds(), chunk_start)
-            s_end = min(scene[1].get_seconds(), chunk_end)
+        for s_start_raw, s_end_raw in scene_list_raw:
+            s_start = max(s_start_raw, chunk_start)
+            s_end = min(s_end_raw, chunk_end)
             if s_start < s_end:
                 valid_scenes.append((s_start, s_end))
         if not valid_scenes:

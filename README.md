@@ -61,24 +61,29 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    Init(["chunk_start = 0"]) --> Cond{"chunk_start 小于 video_duration?"}
+    Init(["video 入口<br/>整片跑一次 pyscenedetect<br/>得到全片 scene 列表"]) --> Loop{"chunk_start 小于 video_duration?"}
 
-    Cond -->|"yes"| Extract["抽帧<br/>scenedetect + get_base64_frames<br/>或 video_base64 整段"]
-    Extract --> Build["拼 prompt<br/>sys + 前情提要 + 角色滚动史 + 帧序列"]
-    Build --> LLM["LLM 多模态调用<br/>JSON 严格输出"]
+    Loop -->|"yes"| Whitelist["从全片 scene 列表抽取<br/>落在 [chunk_start, chunk_end] 内的镜头切换点<br/>作为 timestamps_whitelist"]
+    Whitelist --> Extract["抽帧<br/>scenedetect 复用全片结果 + get_base64_frames<br/>或 video_base64 整段"]
+    Extract --> Build["拼 prompt<br/>sys + 前情提要 + 角色滚动史 + 帧序列 + 白名单"]
+    Build --> LLM["LLM 多模态调用<br/>JSON 严格输出，event 起止必须取自白名单"]
     LLM --> Parse["解析 events、chunk_summary、characters_in_chunk"]
-    Parse --> Revise["prev_event_revision<br/>跨 chunk 截断动作合并"]
+    Parse --> Snap["_validate_and_snap_event_times<br/>把模型输出 snap 到最近的白名单点"]
+    Snap --> Revise["prev_event_revision<br/>跨 chunk 截断动作合并"]
     Revise --> Relay{"动态接力<br/>5 ≤ last_end_sec ≤ chunk_end+10 ?"}
     Relay -->|"yes"| NextEnd["chunk_start = last_end"]
     Relay -->|"no"| Overlap["chunk_start = chunk_end - 20%重叠"]
     NextEnd --> Append["追加到 pass1_progress.json"]
     Overlap --> Append
-    Append --> Cond
+    Append --> Loop
 
-    Cond -->|"done"| Out(["pass1_progress.json<br/>chunks 数组、每个含 data.events 列表"])
+    Loop -->|"done"| Out(["pass1_progress.json<br/>chunks 数组、每个含 data.events 列表"])
 ```
 
-**关键不变量**：events **首尾相连**逐字相等（`events[i+1].start_time == events[i].end_time`），由 prompt 强制约束。
+**关键不变量**：
+- events **首尾相连**逐字相等（`events[i+1].start_time == events[i].end_time`），由 prompt 强制约束。
+- 整片只跑一次 `pyscenedetect.detect`（`frame_extractor.detect_scenes`），结果在所有 chunk 间复用 —— 避免 N× 重复扫描。
+- `timestamps_whitelist` 只包含**当前 chunk 内的镜头切换时间点**（来自全片 scene 列表的 start/end 边界），不强制塞入 `chunk_start`/`chunk_end`；当 chunk 内没有任何镜头切换点时，回落到 `[chunk_start, chunk_end]` 兜底白名单。
 
 ---
 
@@ -142,6 +147,8 @@ flowchart TB
 模型输出 chapters 切分后，本地 `_assemble_final` 按时间区间把 events 物理挂载到对应 chapter（浮点容差 `-0.5s`，最后一章 `+9999s` 兜底，越界事件追加为 `ev_fallback_*`）。
 
 每次运行都会落 `_debug_pass3_input.txt` 与 `_debug_pass3_chapter_response.json` 用于排错。
+
+**`characters_in_event` 抽取**：从 `step3_synthesized_dense_caption` 用 `\[[^\[\]]+\]` 正则抓 `[xxx]`，并丢弃形如 `[00:04:41]` / `[3.14]` 这类纯数字/冒号/小数点构成的"伪角色"（即时间戳），避免把时间戳错当成角色名落到 `event.characters` 里。
 
 ---
 

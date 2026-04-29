@@ -5,6 +5,7 @@ from typing import Optional, Tuple
 
 from .config import PipelineConfig
 from .frame_extractor import (
+    detect_scenes,
     get_base64_frames,
     get_raw_chunk_video_base64,
     get_target_timestamps,
@@ -440,6 +441,25 @@ def _enforce_cross_chunk_continuity(
         current_events.pop(di)
 
 
+def _build_scene_whitelist(
+    precomputed_scenes: list,
+    chunk_start: float,
+    chunk_end: float,
+) -> list:
+    """从全片 scene 列表里提取落在 [chunk_start, chunk_end] 内的镜头切换时间点（秒）。
+
+    pyscenedetect 返回的 scene = (s_start, s_end)，相邻 scene 的 s_end / s_start 重合，
+    set 去重后即为该 chunk 内的镜头切换点集合。完全由 scenedetect 决定，**不强加
+    chunk_start / chunk_end**。模型只能在这些镜头切换点中选取 event 起止时间。
+    """
+    boundaries: set = set()
+    for s_start_raw, s_end_raw in precomputed_scenes:
+        for ts in (s_start_raw, s_end_raw):
+            if chunk_start - 0.01 <= ts <= chunk_end + 0.01:
+                boundaries.add(round(float(ts), 3))
+    return sorted(boundaries)
+
+
 def _resume_from_progress(
     events: list,
     cfg: PipelineConfig,
@@ -479,6 +499,15 @@ def run_pass1(
     _log_context.log_file = os.path.join(run_dir, "pass1.log")
 
     total_duration = float(int(get_video_duration(video_path)))
+
+    precomputed_scenes = None
+    if cfg.frame_extraction_strategy == "scenedetect":
+        precomputed_scenes = detect_scenes(video_path, cfg.scene_detect_threshold)
+        _log(
+            video_tag,
+            f"📐 [pyscenedetect] 整片场景检测完成，共 {len(precomputed_scenes)} 个场景"
+            f"（阈值={cfg.scene_detect_threshold}），将作为各 chunk event 起止白名单。",
+        )
 
     global_results = []
     chunk_start = 0.0
@@ -556,13 +585,14 @@ def run_pass1(
             if not video_b64:
                 chunk_start = chunk_end
                 continue
-            timestamps_str_list = sorted({format_timestamp_sec(t) for t in valid_timestamps})
+            frame_timestamps_str = [format_timestamp_sec(t) for t in valid_timestamps]
             user_content.append({"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{video_b64}"}})
         else:
             target_timestamps = get_target_timestamps(
                 video_path, chunk_start, chunk_end,
                 cfg.frame_extraction_strategy, cfg.scene_detect_threshold, cfg.max_frames_per_chunk,
                 log_prefix=f"[{video_tag}] " if video_tag else "",
+                precomputed_scenes=precomputed_scenes,
             )
             valid_timestamps, base64_frames = get_base64_frames(
                 video_path, target_timestamps, cfg.frame_max_width, cfg.frame_jpg_quality,
@@ -571,14 +601,30 @@ def run_pass1(
                 chunk_start = chunk_end
                 continue
             frame_timestamps_str = [format_timestamp_sec(t) for t in valid_timestamps]
-            timestamps_str_list = sorted(set(frame_timestamps_str))
             for t_str, b64 in zip(frame_timestamps_str, base64_frames):
                 user_content.append({"type": "text", "text": f"画面时间 {t_str}:"})
                 user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"}})
 
-        start_str = format_timestamp_sec(chunk_start)
-        if start_str not in timestamps_str_list:
-            timestamps_str_list.insert(0, start_str)
+        # event 起止白名单：scenedetect 模式仅使用本 chunk 内的镜头切换点；
+        # 其它模式保持原有行为（抽帧时间戳 + chunk_start 兜底）。
+        if precomputed_scenes is not None:
+            boundaries_sec = _build_scene_whitelist(precomputed_scenes, chunk_start, chunk_end)
+            if not boundaries_sec:
+                _log(
+                    video_tag,
+                    f"⚠️ [pyscenedetect] 本段无镜头切换点，回落到 [chunk_start, chunk_end] 兜底白名单。",
+                )
+                boundaries_sec = [chunk_start, chunk_end]
+            timestamps_str_list = sorted({format_timestamp_sec(t) for t in boundaries_sec})
+            _log(
+                video_tag,
+                f"🎬 [白名单] 本段镜头切换点 {len(timestamps_str_list)} 个: {timestamps_str_list}",
+            )
+        else:
+            timestamps_str_list = sorted(set(frame_timestamps_str))
+            start_str = format_timestamp_sec(chunk_start)
+            if start_str not in timestamps_str_list:
+                timestamps_str_list.insert(0, start_str)
 
         timestamps_str = ", ".join(timestamps_str_list)
 
