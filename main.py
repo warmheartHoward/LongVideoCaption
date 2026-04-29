@@ -29,9 +29,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--target-fps", type=float, default=None, help="覆盖 target_fps")
     p.add_argument(
         "--pass1-timestamp-mode",
-        choices=["second", "millisecond"],
+        choices=["second", "millisecond", "qwen_millisecond"],
         default=None,
-        help="Pass1 给模型的 timestamp 白名单格式：second=hh:mm:ss，millisecond=hh:mm:ss.fff",
+        help=(
+            "Pass1 给模型的 timestamp 白名单格式：second=hh:mm:ss，"
+            "millisecond=hh:mm:ss.fff，qwen_millisecond=x.x seconds 提示词格式、毫秒格式落盘"
+        ),
     )
 
     p.add_argument("--conf-thresh", type=int, default=None, help="覆盖 pass2_confidence_threshold")

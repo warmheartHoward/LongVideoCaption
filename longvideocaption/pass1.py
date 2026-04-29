@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import threading
 from typing import Optional, Tuple
 
@@ -25,6 +26,8 @@ from .utils import (
 
 
 PASS_NAME = "pass1_perception"
+PASS1_TIMESTAMP_MODES = ("second", "millisecond", "qwen_millisecond")
+_QWEN_SECONDS_RE = re.compile(r"^\s*<?\s*(\d+(?:\.\d+)?)\s*seconds\s*>?\s*$", re.IGNORECASE)
 
 _log_context = threading.local()
 
@@ -771,8 +774,90 @@ def _build_scene_whitelist(
     return sorted(boundaries)
 
 
-def _format_pass1_timestamp(seconds: float, cfg: PipelineConfig) -> str:
+def _round_qwen_timestamp_seconds(seconds: float) -> float:
+    return round(float(seconds), 1)
+
+
+def _format_qwen_timestamp(seconds: float) -> str:
+    return f"{_round_qwen_timestamp_seconds(seconds):.1f} seconds"
+
+
+def _format_qwen_frame_timestamp(seconds: float) -> str:
+    return f"<{_round_qwen_timestamp_seconds(seconds):.1f} seconds>"
+
+
+def _parse_qwen_timestamp(ts_str: str) -> Optional[float]:
+    if not isinstance(ts_str, str):
+        return None
+    match = _QWEN_SECONDS_RE.fullmatch(ts_str)
+    if not match:
+        return None
+    return float(match.group(1))
+
+
+def _format_pass1_prompt_timestamp(seconds: float, cfg: PipelineConfig) -> str:
+    if cfg.pass1_timestamp_mode == "qwen_millisecond":
+        return _format_qwen_timestamp(seconds)
     return format_timestamp_for_mode(seconds, cfg.pass1_timestamp_mode)
+
+
+def _format_pass1_storage_timestamp(seconds: float, cfg: PipelineConfig) -> str:
+    if cfg.pass1_timestamp_mode == "qwen_millisecond":
+        return format_timestamp(_round_qwen_timestamp_seconds(seconds))
+    return format_timestamp_for_mode(seconds, cfg.pass1_timestamp_mode)
+
+
+def _timestamp_sort_key(ts_str: str) -> float:
+    qwen_sec = _parse_qwen_timestamp(ts_str)
+    if qwen_sec is not None:
+        return qwen_sec
+    return parse_timestamp_to_seconds(ts_str)
+
+
+def _canonicalize_qwen_timestamp(ts_str: str) -> str:
+    qwen_sec = _parse_qwen_timestamp(ts_str)
+    if qwen_sec is not None:
+        return format_timestamp(qwen_sec)
+    strict_sec = parse_timestamp_to_seconds_strict(ts_str)
+    if strict_sec is not None:
+        return format_timestamp(strict_sec)
+    return ts_str
+
+
+def _normalize_qwen_output_timestamps(chunk_data: dict, video_tag: str) -> None:
+    """把 qwen 秒格式输出转成内部统一的 [hh:mm:ss.fff]，避免污染后续阶段。"""
+    timestamp_keys = {"start_time", "end_time", "anchor_timestamp"}
+    changed = 0
+
+    def _walk(value, parent_key: str = ""):
+        nonlocal changed
+        if isinstance(value, dict):
+            for key, child in list(value.items()):
+                if key in timestamp_keys and isinstance(child, str):
+                    new_child = _canonicalize_qwen_timestamp(child)
+                    if new_child != child:
+                        changed += 1
+                        value[key] = new_child
+                elif key == "key_frame_times" and isinstance(child, list):
+                    new_list = []
+                    for item in child:
+                        if isinstance(item, str):
+                            new_item = _canonicalize_qwen_timestamp(item)
+                            if new_item != item:
+                                changed += 1
+                            new_list.append(new_item)
+                        else:
+                            new_list.append(item)
+                    value[key] = new_list
+                else:
+                    _walk(child, key)
+        elif isinstance(value, list):
+            for item in value:
+                _walk(item, parent_key)
+
+    _walk(chunk_data)
+    if changed:
+        _log(video_tag, f"[qwen_millisecond] 已将 {changed} 个模型时间戳规范化为 [hh:mm:ss.fff]")
 
 
 def _resume_from_progress(
@@ -810,8 +895,10 @@ def run_pass1(
     token_tracker: Optional[TokenTracker] = None,
     video_tag: str = "",
 ) -> str:
-    if cfg.pass1_timestamp_mode not in ("second", "millisecond"):
-        raise ValueError("cfg.pass1_timestamp_mode 必须是 'second' 或 'millisecond'")
+    if cfg.pass1_timestamp_mode not in PASS1_TIMESTAMP_MODES:
+        raise ValueError(
+            "cfg.pass1_timestamp_mode 必须是 'second'、'millisecond' 或 'qwen_millisecond'"
+        )
 
     os.makedirs(run_dir, exist_ok=True)
     pass1_output_path = os.path.join(run_dir, "pass1_progress.json")
@@ -903,6 +990,7 @@ def run_pass1(
 
         user_content = []
         timestamps_str_list = []
+        prompt_timestamps_str_list = []
 
         if cfg.input_payload_format == "video_base64":
             valid_timestamps, video_b64 = get_raw_chunk_video_base64(
@@ -911,7 +999,8 @@ def run_pass1(
             if not video_b64:
                 chunk_start = chunk_end
                 continue
-            frame_timestamps_str = [_format_pass1_timestamp(t, cfg) for t in valid_timestamps]
+            frame_timestamps_str = [_format_pass1_storage_timestamp(t, cfg) for t in valid_timestamps]
+            frame_prompt_timestamps_str = [_format_pass1_prompt_timestamp(t, cfg) for t in valid_timestamps]
             user_content.append({"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{video_b64}"}})
         else:
             target_timestamps = get_target_timestamps(
@@ -931,13 +1020,19 @@ def run_pass1(
             if not base64_frames:
                 chunk_start = chunk_end
                 continue
-            frame_timestamps_str = [_format_pass1_timestamp(t, cfg) for t in valid_timestamps]
+            frame_timestamps_str = [_format_pass1_storage_timestamp(t, cfg) for t in valid_timestamps]
+            frame_prompt_timestamps_str = [_format_pass1_prompt_timestamp(t, cfg) for t in valid_timestamps]
             if 'qwen' in cfg.model_name:
                 for t_str, b64 in zip(valid_timestamps, base64_frames):
-                    user_content.append({"type": "text", "text": f"<{t_str:.1f} seconds>"})
+                    user_content.append({"type": "text", "text": _format_qwen_frame_timestamp(t_str)})
                     user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
             else:
-                for t_str, b64 in zip(frame_timestamps_str, base64_frames):
+                frame_label_timestamps = (
+                    [_format_qwen_frame_timestamp(t) for t in valid_timestamps]
+                    if cfg.pass1_timestamp_mode == "qwen_millisecond"
+                    else frame_timestamps_str
+                )
+                for t_str, b64 in zip(frame_label_timestamps, base64_frames):
                     user_content.append({"type": "text", "text": f"画面时间 {t_str}:"})
                     user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"}})
 
@@ -950,16 +1045,24 @@ def run_pass1(
             if overlap_active and last_end_str:
                 boundaries_sec.add(parse_timestamp_to_seconds(last_end_str))
             timestamps_str_list = sorted(
-                {_format_pass1_timestamp(round(float(t), 3), cfg) for t in boundaries_sec},
+                {_format_pass1_storage_timestamp(round(float(t), 3), cfg) for t in boundaries_sec},
                 key=parse_timestamp_to_seconds,
+            )
+            prompt_timestamps_str_list = sorted(
+                {_format_pass1_prompt_timestamp(round(float(t), 3), cfg) for t in boundaries_sec},
+                key=_timestamp_sort_key,
             )
         else:
             timestamps_str_list = sorted(set(frame_timestamps_str), key=parse_timestamp_to_seconds)
-            start_str = _format_pass1_timestamp(chunk_start, cfg)
+            prompt_timestamps_str_list = sorted(set(frame_prompt_timestamps_str), key=_timestamp_sort_key)
+            start_str = _format_pass1_storage_timestamp(chunk_start, cfg)
+            prompt_start_str = _format_pass1_prompt_timestamp(chunk_start, cfg)
             if start_str not in timestamps_str_list:
                 timestamps_str_list.insert(0, start_str)
+            if prompt_start_str not in prompt_timestamps_str_list:
+                prompt_timestamps_str_list.insert(0, prompt_start_str)
 
-        timestamps_str = ", ".join(timestamps_str_list)
+        timestamps_str = ", ".join(prompt_timestamps_str_list)
 
         sys_prompt = build_sys_prompt(chunk_name, timestamps_str)
         usr_prompt = build_usr_prompt(previous_context)
@@ -974,7 +1077,7 @@ def run_pass1(
             chunk_end=chunk_end,
             usr_prompt=usr_prompt,
             previous_context=previous_context,
-            timestamps_str_list=timestamps_str_list,
+            timestamps_str_list=prompt_timestamps_str_list,
         )
 
         next_start = chunk_start + (cfg.chunk_duration_sec * 0.8)
@@ -987,6 +1090,9 @@ def run_pass1(
                 max_retries=cfg.max_retries, chunk_name=log_tag,
                 token_tracker=token_tracker, stage=PASS_NAME,
             )
+
+            if cfg.pass1_timestamp_mode == "qwen_millisecond":
+                _normalize_qwen_output_timestamps(chunk_data, video_tag)
 
             _validate_and_snap_event_times(
                 chunk_data.get("events", []),

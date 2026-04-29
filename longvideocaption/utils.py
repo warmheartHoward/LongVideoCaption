@@ -22,9 +22,13 @@ def format_timestamp_sec(seconds: float) -> str:
 def format_timestamp_for_mode(seconds: float, mode: str) -> str:
     if mode == "millisecond":
         return format_timestamp(seconds)
+    if mode == "qwen_millisecond":
+        return format_timestamp(round(float(seconds), 1))
     if mode == "second":
         return format_timestamp_sec(seconds)
-    raise ValueError(f"不支持的 timestamp 模式: {mode!r}，应为 'second' 或 'millisecond'")
+    raise ValueError(
+        f"不支持的 timestamp 模式: {mode!r}，应为 'second'、'millisecond' 或 'qwen_millisecond'"
+    )
 
 
 _TIMESTAMP_RE = re.compile(r'^\[?(\d{2,}):([0-5]\d):([0-5]\d)(?:\.(\d{3}))?\]?$')

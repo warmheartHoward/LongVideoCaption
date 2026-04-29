@@ -293,7 +293,7 @@ python main.py \
 | `--scene-thresh`  | scenedetect 阈值                         | `15.0`                       |
 | `--frame-width`   | 帧宽（缩放上限）                         | `960`                        |
 | `--target-fps`    | video_base64 采样帧率                    | `1.0`                        |
-| `--pass1-timestamp-mode` | Pass 1 时间戳白名单格式：`second` / `millisecond` | `second`                     |
+| `--pass1-timestamp-mode` | Pass 1 时间戳白名单格式：`second` / `millisecond` / `qwen_millisecond`（提示词用 `x.x seconds`，落盘仍为 `[hh:mm:ss.fff]`） | `second`                     |
 | `--conf-thresh`   | Pass 2 身份对齐置信度拦截阈值            | `80`                         |
 
 进阶超参（Stage 2/3 的 fps、max_frames、temperature、max_tokens 等）在 `longvideocaption/config.py` 的 `PipelineConfig` 里改默认值。

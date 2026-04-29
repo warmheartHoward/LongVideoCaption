@@ -21,7 +21,7 @@ class PipelineConfig:
     frame_max_width: int = 960
     max_total_pixels: int = 128 * 1024 * 32 * 32
     frame_jpg_quality: int = 95
-    pass1_timestamp_mode: str = "second"  # second 或 millisecond
+    pass1_timestamp_mode: str = "second"  # second / millisecond / qwen_millisecond
     llm_temperature: float = 0.2
     llm_max_tokens: int = 32768
     prev_event_overlap_count: int = 0
