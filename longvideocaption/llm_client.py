@@ -28,16 +28,20 @@ def request_llm_with_retry(
     chunk_name="全局",
     token_tracker=None,
     stage="unknown",
+    force_json=False,
 ):
     for attempt in range(1, max_retries + 1):
         try:
             start_api = time.time()
-            completion = client.chat.completions.create(
-                model=model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                messages=messages,
-            )
+            request_kwargs = {
+                "model": model,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "messages": messages,
+            }
+            if force_json:
+                request_kwargs["response_format"] = {"type": "json_object"}
+            completion = client.chat.completions.create(**request_kwargs)
             api_cost = time.time() - start_api
             usage = completion.usage
             if usage:

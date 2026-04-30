@@ -395,6 +395,7 @@ def _run_chapter_aggregation(
         max_tokens=cfg.pass3_max_tokens, temperature=cfg.pass3_temperature,
         max_retries=cfg.max_retries, chunk_name=log_tag,
         token_tracker=token_tracker, stage=PASS_NAME,
+        force_json=True,
     )
     _dump_debug(run_dir, "_debug_pass3_chapter_response.json", chapter_agg_result)
     return chapter_agg_result, all_events

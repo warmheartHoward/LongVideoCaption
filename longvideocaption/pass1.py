@@ -1089,6 +1089,7 @@ def run_pass1(
                 max_tokens=cfg.llm_max_tokens, temperature=cfg.llm_temperature,
                 max_retries=cfg.max_retries, chunk_name=log_tag,
                 token_tracker=token_tracker, stage=PASS_NAME,
+                force_json=True,
             )
 
             if cfg.pass1_timestamp_mode == "qwen_millisecond":

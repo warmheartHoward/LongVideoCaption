@@ -303,6 +303,7 @@ def _phase_a_rolling(cfg, video_path, pass1_results, global_bank, chunk_mappings
                         {"role": "system", "content": SYS_PROMPT_ALIGNMENT},
                         {"role": "user", "content": user_content},
                     ],
+                    response_format={"type": "json_object"},
                 )
                 if response.usage and token_tracker is not None:
                     token_tracker.record(PASS_NAME, response.usage)
@@ -508,6 +509,7 @@ def _phase_b_review(cfg, video_path, global_bank, review_log,
                         {"role": "system", "content": SYS_PROMPT_REVIEW},
                         {"role": "user", "content": user_content},
                     ],
+                    response_format={"type": "json_object"},
                 )
                 if response.usage and token_tracker is not None:
                     token_tracker.record(REVIEW_STAGE_NAME, response.usage)

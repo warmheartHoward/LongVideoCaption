@@ -301,6 +301,7 @@ def run_stage3(
         chunk_name=log_tag,
         token_tracker=token_tracker,
         stage=STAGE_NAME,
+        force_json=True,
     )
 
     polished_map: dict = {}
