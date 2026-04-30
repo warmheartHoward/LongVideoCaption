@@ -9,7 +9,7 @@ from .llm_client import build_client
 from .pass1 import run_pass1
 from .pass2 import run_pass2
 from .pass3 import run_pass3
-from .stage2 import run_stage2
+from .stage2_parallel import run_stage2_parallel as run_stage2
 from .stage3 import run_stage3
 from .token_tracker import TokenTracker, _format_seconds
 from .utils import sanitize_filename

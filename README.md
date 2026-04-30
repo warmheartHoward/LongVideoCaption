@@ -25,7 +25,7 @@ flowchart TB
         P1["Pass 1<br/>视觉感知"]
         P2["Pass 2<br/>身份对齐"]
         P3["Pass 3<br/>章节聚合"]
-        S2["Stage 2<br/>帧级精修"]
+        S2["Stage 2 Parallel<br/>帧级精修"]
         S3["Stage 3<br/>全局润色"]
         P1 --> P2 --> P3 --> S2 --> S3
     end
@@ -153,7 +153,7 @@ flowchart TB
 
 ---
 
-### Stage 2 — 事件级帧精修（per-event 串行）
+### Stage 2 Parallel — 事件级帧精修（per-event 并行）
 
 ```mermaid
 flowchart TB
@@ -170,7 +170,10 @@ flowchart TB
     AdjStart -->|"否"| BuildMsg["messages = sys + user_text<br/>+ N 张 image_url 带秒数"]
     Shift --> BuildMsg
 
-    BuildMsg --> CallVL["request_llm_text_with_retry<br/>纯文本输出"]
+    BuildMsg --> Gate{"qwen 模型 ?"}
+    Gate -->|"是"| Budget["申请视觉 token 预算<br/>in-flight visual_tokens ≤ stage2_qwen_parallel_visual_token_budget"]
+    Gate -->|"否"| CallVL
+    Budget --> CallVL["request_llm_text_with_retry<br/>纯文本输出"]
     CallVL --> Update["ev.frame_caption = result<br/>ev.frame_caption_output_tokens = completion_tokens"]
     Update --> Persist["整体落盘<br/>stage2_refined.json"]
     Persist --> Loop
@@ -179,7 +182,9 @@ flowchart TB
 ```
 
 **关键约束**：
-- **串行处理** —— 每个 event 独立抽帧并调用一次 VL 模型；每完成一个 event 就立即落盘。
+- **并行处理** —— 每个 event 独立抽帧并调用一次 VL 模型；线程池并行执行，每完成一个 event 就立即落盘。
+- **非 qwen 并发**：最大并行请求数由 `PipelineConfig.stage2_parallel_max_workers` 控制，默认 `4`。
+- **qwen 自适应并发**：`get_base64_frames_qwen` 会计算视觉 token 数：`actual_frame_count * target_h * target_w // 32 // 32`。并行请求会先申请视觉 token 预算，保证同时在飞请求的视觉 token 总量不超过 `PipelineConfig.stage2_qwen_parallel_visual_token_budget`，默认 `128 * 1024`；线程池安全上限由 `stage2_qwen_parallel_max_workers` 控制，默认 `32`。
 - **输出 token 记录**：`frame_caption_output_tokens` 来自该 event 请求返回的 `usage.completion_tokens`，用于统计每条精修 caption 的输出 token 数。续跑旧产物时，已存在 `frame_caption` 但没有 usage 记录的 event 会补为 `0`。
 - **失败容错**：单 event 抽帧/调用失败仅跳过该 event，不阻断后续。
 
@@ -238,7 +243,8 @@ LongVideoCaption_v2/
     ├── pass1.py                  # Pass 1 视觉感知
     ├── pass2.py                  # Pass 2 三阶段身份对齐
     ├── pass3.py                  # Pass 3 章节聚合 + 装配
-    ├── stage2.py                 # Stage 2 事件级帧精修
+    ├── stage2.py                 # Stage 2 串行版事件级帧精修
+    ├── stage2_parallel.py        # Stage 2 并行版事件级帧精修（pipeline 默认使用）
     ├── stage3.py                 # Stage 3 全局润色
     ├── pipeline.py               # 单视频串联 5 阶段
     ├── runner.py                 # 文件夹扫描 + ThreadPoolExecutor
@@ -308,7 +314,7 @@ python main.py \
 | `--pass1-timestamp-mode` | Pass 1 时间戳白名单格式：`second` / `millisecond` / `qwen_millisecond`（提示词用 `x.x seconds`，落盘仍为 `[hh:mm:ss.fff]`） | `second`                     |
 | `--conf-thresh`   | Pass 2 身份对齐置信度拦截阈值            | `80`                         |
 
-进阶超参（Stage 2/3 的 fps、max_frames、temperature、max_tokens 等）在 `longvideocaption/config.py` 的 `PipelineConfig` 里改默认值。
+进阶超参（Stage 2/3 的 fps、max_frames、temperature、max_tokens 等）在 `longvideocaption/config.py` 的 `PipelineConfig` 里改默认值。Stage 2 并行相关参数包括 `stage2_parallel_max_workers`（非 qwen 最大并行请求数，默认 `4`）、`stage2_qwen_parallel_max_workers`（qwen 线程池安全上限，默认 `32`）和 `stage2_qwen_parallel_visual_token_budget`（qwen 同时在飞请求的视觉 token 预算，默认 `128 * 1024`）。
 
 ---
 
@@ -331,7 +337,7 @@ python main.py \
         ├── pass3_confidence.json   # Pass 3 健康度报告：章节边界/挂载/分布
         ├── _debug_pass3_input.txt        # Pass 3 实际喂给模型的完整 prompt
         ├── _debug_pass3_chapter_response.json  # Pass 3 模型原始返回
-        ├── stage2_refined.json     # Stage 2 终产物：每 event 多 frame_caption / frame_timestamps / frame_caption_output_tokens
+        ├── stage2_refined.json     # Stage 2 终产物：每 event 多 frame_caption / frame_timestamps / frame_caption_output_tokens（qwen 另含 frame_visual_tokens）
         ├── stage3_polished.json    # ★ Stage 3 终产物：最终 final_caption
         ├── token_usage.json        # 本视频分阶段 token 消耗
         └── run_meta.json           # 运行时间戳 + 配置快照 + status
@@ -360,6 +366,7 @@ python main.py \
           "frame_caption": "Stage 2 事件级帧精修结果",
           "frame_timestamps": [12.5, 13.5, ...],
           "frame_caption_output_tokens": 123,
+          "frame_visual_tokens": 4096,
           "final_caption": "★ Stage 3 全局润色后的最终描述",
           "characters_in_event": [{"name": "[李雷]", "desc": "..."}],
           "key_frame_times": ["..."]
@@ -414,7 +421,7 @@ python main.py \
 ## 并发模型
 
 - 每个视频独立 worker 线程 → 独立 `OpenAI` client / `httpx.Client` / `cv2.VideoCapture`，互不干扰。
-- 视频内部各阶段**严格串行**（Pass 2 Phase A 需要 chunk 顺序；Stage 2 按 event 顺序逐条抽帧、调用、落盘）。
+- 视频内部主阶段按 Pass 1 → Pass 2 → Pass 3 → Stage 2 → Stage 3 串行推进；Stage 2 内部会对多个 event 并行抽帧和请求。
 - `GlobalTokenAggregator` 是唯一跨线程共享对象，带 `threading.Lock`，每视频收尾时调用一次。
 - 建议 `--workers` 别调太大，受 LLM 厂商 QPS / TPM 限制，2–4 一般足够。
 
@@ -424,5 +431,5 @@ python main.py \
 
 - `config.py` 里 `api_key` / `base_url` 默认空串，必须通过 CLI 或修改默认值来提供。
 - scenedetect 多线程可用，但每个视频内部是同步 CPU 计算，大批量并发需留意 CPU。
-- Stage 2 所有 event 串行 → 长视频耗时较长（事件数 × 单调用耗时），可以根据需要在 `config.py` 调小 `stage2_max_frames` 来提速。
+- Stage 2 会并行处理多个 event；长视频仍可能受 VL 调用耗时、厂商 QPS/TPM 和 qwen 视觉 token 预算限制，可以根据需要在 `config.py` 调小 `stage2_max_frames` 或调整并行参数。
 - Pass 3 的 `_debug_*` 文件每次都会覆盖写入，仅供当次排错使用，不要直接消费。

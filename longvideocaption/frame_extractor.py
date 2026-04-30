@@ -101,6 +101,7 @@ def get_base64_frames_qwen(
     target_timestamps: List[float],
     max_total_pixels: int,
     jpg_quality: int,
+    return_visual_tokens: bool = False,
 ) -> Tuple[List[float], List[str]]:
     cap = cv2.VideoCapture(video_path)
     orig_fps = cap.get(cv2.CAP_PROP_FPS)
@@ -111,6 +112,7 @@ def get_base64_frames_qwen(
     actual_frame_count = len(target_timestamps)
     max_total_pixels = min(max_total_pixels, actual_frame_count * max_pixels_per_frame)
     target_h, target_w = smart_resize(actual_frame_count, orig_height, orig_width, max_pixels=max_total_pixels)
+    visual_tokens = actual_frame_count * target_h * target_w // 32 // 32
 
     valid_timestamps: List[float] = []
     base64_frames: List[str] = []
@@ -123,6 +125,8 @@ def get_base64_frames_qwen(
             base64_frames.append(base64.b64encode(buffer).decode('utf-8'))
             valid_timestamps.append(t)
     cap.release()
+    if return_visual_tokens:
+        return valid_timestamps, base64_frames, visual_tokens
     return valid_timestamps, base64_frames
 
 
@@ -239,8 +243,11 @@ def get_event_frames_base64_qwen(
     max_frames: int,
     max_total_pixels: int,
     jpg_quality: int,
+    return_visual_tokens: bool = False,
 ) -> Tuple[List[float], List[str]]:
     if end_sec <= start_sec:
+        if return_visual_tokens:
+            return [], [], 0
         return [], []
 
     duration = end_sec - start_sec
@@ -252,7 +259,13 @@ def get_event_frames_base64_qwen(
     else:
         timestamps = np.linspace(start_sec, end_sec, n_frames, endpoint=False).tolist()
 
-    return get_base64_frames_qwen(video_path, timestamps, max_total_pixels, jpg_quality)
+    return get_base64_frames_qwen(
+        video_path,
+        timestamps,
+        max_total_pixels,
+        jpg_quality,
+        return_visual_tokens=return_visual_tokens,
+    )
 
 
 def extract_single_frame_base64(video_path: str, timestamp_str: str, max_width=960, jpg_quality: int = 90) -> str:

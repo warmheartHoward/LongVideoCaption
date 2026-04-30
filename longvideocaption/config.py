@@ -50,6 +50,9 @@ class PipelineConfig:
     stage2_frame_max_width: int = 960
     stage2_max_total_pixels: int = 128 * 1024 * 32 * 32
     stage2_frame_jpg_quality: int = 95
+    stage2_parallel_max_workers: int = 4
+    stage2_qwen_parallel_max_workers: int = 32
+    stage2_qwen_parallel_visual_token_budget: int = 128 * 1024
 
     stage3_temperature: float = 0.4
     stage3_max_tokens: int = 65536
