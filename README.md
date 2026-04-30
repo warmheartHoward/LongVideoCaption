@@ -1,7 +1,7 @@
 # Long Video Caption v2
 
 长视频结构化打标流水线，五个阶段串行：**视觉感知 → 身份对齐 → 章节聚合 → 帧级精修 → 全局润色**。
-支持文件夹批量、多线程并发、按内容稳定路径的细粒度断点续打、分阶段 Token 统计。
+支持文件夹批量、多线程并发、按内容稳定路径的细粒度断点续打、分阶段 Token 统计，并在 JSON 输出阶段启用 JSON object 模式。
 
 ---
 
@@ -159,12 +159,10 @@ flowchart TB
 flowchart TB
     Start["读 pass3_final.json"] --> Exists{"stage2_refined.json 存在 ?"}
     Exists -->|"是"| Resume["载入状态<br/>跳过已有 frame_caption 的 event"]
-    Exists -->|"否"| Clone["克隆结构<br/>每个 event 加 frame_caption 空"]
+    Exists -->|"否"| Clone["克隆结构<br/>每个 event 加 Stage2 默认字段"]
 
     Resume --> Loop{"遍历 event"}
     Clone --> Loop
-    Loop -->|"chapter 切换"| Reset["previous_caption 置空"]
-    Reset --> ExtFrames["get_event_frames_base64<br/>区间内按 stage2_fps 抽帧"]
     Loop --> ExtFrames
 
     ExtFrames --> AdjStart{"abs start - prev.end 小于 0.01s ?"}
@@ -173,25 +171,39 @@ flowchart TB
     Shift --> BuildMsg
 
     BuildMsg --> CallVL["request_llm_text_with_retry<br/>纯文本输出"]
-    CallVL --> Update["ev.frame_caption = result<br/>previous_caption = result"]
+    CallVL --> Update["ev.frame_caption = result<br/>ev.frame_caption_output_tokens = completion_tokens"]
     Update --> Persist["整体落盘<br/>stage2_refined.json"]
     Persist --> Loop
 
-    Loop -->|"done"| End(["stage2_refined.json<br/>每 event 多 frame_caption 与 frame_timestamps"])
+    Loop -->|"done"| End(["stage2_refined.json<br/>每 event 多 frame_caption、frame_timestamps、frame_caption_output_tokens"])
 ```
 
 **关键约束**：
-- **串行处理** —— 当前 event 必须用上一个 event 的 `frame_caption` 作为前序上下文。
-- **chapter 边界**：首事件不传 `previous_caption`，避免章节叙事污染。
+- **串行处理** —— 每个 event 独立抽帧并调用一次 VL 模型；每完成一个 event 就立即落盘。
+- **输出 token 记录**：`frame_caption_output_tokens` 来自该 event 请求返回的 `usage.completion_tokens`，用于统计每条精修 caption 的输出 token 数。续跑旧产物时，已存在 `frame_caption` 但没有 usage 记录的 event 会补为 `0`。
 - **失败容错**：单 event 抽帧/调用失败仅跳过该 event，不阻断后续。
 
 ---
 
 ### Stage 3 — 全局精修（单次纯文本 LLM 调用）
 
-把所有 chapter/event 拼成 `{chapters:[{chapter_id, chapter_title, events:[{event_id, caption}]}]}` 一次性喂给模型，回填每个 event 的 `final_caption`。模型未回填的 event 退回到 `frame_caption`/`step3_synthesized_dense_caption`。
+把所有 chapter/event 拼成 `{chapters:[{chapter_id, chapter_title, events:[{event_id, caption}]}]}` 一次性喂给模型，回填每个 event 的 `final_caption`。模型未回填的 event 退回到 `frame_caption`/`step3_synthesized_dense_caption`。该调用要求 JSON object 返回。
 
 主要做：跨章节叙事缝合、指代统一去冗余、消除 "视频开头/纠正：xxx" 之类元描述与负向纠错痕迹。
+
+---
+
+## LLM 调用约定
+
+`llm_client.request_llm_with_retry(..., force_json=True)` 会在 Chat Completions 请求中附加 `response_format={"type": "json_object"}`，用于要求模型返回可解析 JSON。当前启用 JSON object 模式的调用包括：
+
+- Pass 1：chunk 级视觉解析，输出 `characters_in_chunk` / `events` / `chunk_summary`。
+- Pass 2 Phase A：滚动身份聚类判决（直接 SDK 调用，显式传 `response_format`）。
+- Pass 2 Phase B：高清终审命名与描述重写（直接 SDK 调用，显式传 `response_format`）。
+- Pass 3：章节切分与全片总结。
+- Stage 3：全局润色，保持 chapter/event 结构并回填 caption。
+
+Stage 2 使用 `request_llm_text_with_retry`，输出是单段纯文本，不开启 JSON object 模式；但会读取该次请求的 `usage.completion_tokens` 并写入对应 event 的 `frame_caption_output_tokens`。
 
 ---
 
@@ -221,7 +233,7 @@ LongVideoCaption_v2/
     ├── config.py                 # PipelineConfig + hyper_signature
     ├── utils.py                  # 时间戳 / JSON 清洗 / 文件名安全化
     ├── token_tracker.py          # per-video Tracker + 全局聚合器（带锁）
-    ├── llm_client.py             # JSON / 纯文本两种 LLM 调用，统一重试 + token hook
+    ├── llm_client.py             # JSON / 纯文本两种 LLM 调用，统一重试 + token hook；JSON 调用可开启 response_format
     ├── frame_extractor.py        # scenedetect 抽帧 / chunk 视频 / 单帧 / 区间抽帧
     ├── pass1.py                  # Pass 1 视觉感知
     ├── pass2.py                  # Pass 2 三阶段身份对齐
@@ -319,7 +331,7 @@ python main.py \
         ├── pass3_confidence.json   # Pass 3 健康度报告：章节边界/挂载/分布
         ├── _debug_pass3_input.txt        # Pass 3 实际喂给模型的完整 prompt
         ├── _debug_pass3_chapter_response.json  # Pass 3 模型原始返回
-        ├── stage2_refined.json     # Stage 2 终产物：每 event 多 frame_caption
+        ├── stage2_refined.json     # Stage 2 终产物：每 event 多 frame_caption / frame_timestamps / frame_caption_output_tokens
         ├── stage3_polished.json    # ★ Stage 3 终产物：最终 final_caption
         ├── token_usage.json        # 本视频分阶段 token 消耗
         └── run_meta.json           # 运行时间戳 + 配置快照 + status
@@ -347,6 +359,7 @@ python main.py \
           "step3_synthesized_dense_caption": "Pass 1 融合描述（含 [全局角色名]）",
           "frame_caption": "Stage 2 事件级帧精修结果",
           "frame_timestamps": [12.5, 13.5, ...],
+          "frame_caption_output_tokens": 123,
           "final_caption": "★ Stage 3 全局润色后的最终描述",
           "characters_in_event": [{"name": "[李雷]", "desc": "..."}],
           "key_frame_times": ["..."]
@@ -394,13 +407,14 @@ python main.py \
 
 - **单视频级**：`{run_dir}/token_usage.json`
 - **批量聚合**：`{output}/_aggregate_token_usage.json`（含 `per_video` / `per_stage_totals` / `grand_total`）
+- **Stage 2 event 级**：`stage2_refined.json` 中每个 event 的 `frame_caption_output_tokens` 记录该 event 精修回复的输出 token 数。
 
 ---
 
 ## 并发模型
 
 - 每个视频独立 worker 线程 → 独立 `OpenAI` client / `httpx.Client` / `cv2.VideoCapture`，互不干扰。
-- 视频内部各阶段**严格串行**（Pass 2 Phase A 需要 chunk 顺序、Stage 2 依赖前一 event 的精修结果）。
+- 视频内部各阶段**严格串行**（Pass 2 Phase A 需要 chunk 顺序；Stage 2 按 event 顺序逐条抽帧、调用、落盘）。
 - `GlobalTokenAggregator` 是唯一跨线程共享对象，带 `threading.Lock`，每视频收尾时调用一次。
 - 建议 `--workers` 别调太大，受 LLM 厂商 QPS / TPM 限制，2–4 一般足够。
 
