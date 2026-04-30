@@ -15,7 +15,7 @@ from .frame_extractor import get_event_frames_base64, get_event_frames_base64_qw
 from .llm_client import request_llm_text_with_retry
 from .prompts.stage2_v3 import SYS_PROMPT_STAGE2, build_stage2_user_prompt
 from .token_tracker import TokenTracker
-from .utils import parse_timestamp_to_seconds
+from .utils import format_timestamp_for_mode, parse_timestamp_to_seconds
 
 
 STAGE_NAME = "stage2_frame_inspection"
@@ -58,13 +58,40 @@ def _ensure_stage2_event_fields(state: dict) -> None:
             ev.setdefault("frame_caption_output_tokens", 0)
 
 
-def _build_user_content(base64_frames: List[str], timestamps: List[float], user_text: str) -> list:
+def _build_user_content(
+    cfg: PipelineConfig,
+    base64_frames: List[str],
+    timestamps: List[float],
+    user_text: str,
+) -> list:
     content: list = []
     for ts, b64 in zip(timestamps, base64_frames):
-        content.append({"type": "text", "text": f"<{ts:.1f} seconds>"})
-        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+        if "qwen" in cfg.model_name.lower():
+            content.append({"type": "text", "text": _format_qwen_frame_timestamp(ts)})
+            content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+        else:
+            label = _format_stage2_frame_label(ts, cfg)
+            content.append({"type": "text", "text": f"画面时间 {label}:"})
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "low"},
+            })
     content.append({"type": "text", "text": user_text})
     return content
+
+
+def _round_qwen_timestamp_seconds(seconds: float) -> float:
+    return round(float(seconds), 1)
+
+
+def _format_qwen_frame_timestamp(seconds: float) -> str:
+    return f"<{_round_qwen_timestamp_seconds(seconds):.1f} seconds>"
+
+
+def _format_stage2_frame_label(seconds: float, cfg: PipelineConfig) -> str:
+    if cfg.pass1_timestamp_mode == "qwen_millisecond":
+        return _format_qwen_frame_timestamp(seconds)
+    return format_timestamp_for_mode(seconds, cfg.pass1_timestamp_mode)
 
 
 def _write_state(path: str, state: dict) -> None:
@@ -143,7 +170,7 @@ def _run_one_event(
     initial_caption = ev.get("step3_synthesized_dense_caption", "")
     characters_in_event = ev.get("characters_in_event", [])
     user_text = build_stage2_user_prompt(initial_caption, characters_in_event)
-    user_content = _build_user_content(base64_frames, timestamps, user_text)
+    user_content = _build_user_content(cfg, base64_frames, timestamps, user_text)
     log_tag = f"[{video_tag}] Stage2 {event_id} ({len(base64_frames)}帧)" if video_tag else f"Stage2 {event_id}"
 
     budget_charge = 0
