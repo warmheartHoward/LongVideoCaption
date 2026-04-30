@@ -1,7 +1,7 @@
 """Stage 2 — 事件级帧精修（Frame Inspection）。
 
-输入：stage1 终产物（pass3_final.json，含 chapters/events/step3_synthesized_dense_caption）。
-处理：按 event 串行抽帧 + VL 调用，把上一 event 的 frame_caption 作为前序上下文（chapter 首事件不传）。
+输入：stage1 终产物（pass3_final.json，含 chapters/events/step3_synthesized_dense_caption / characters_in_event）。
+处理：按 event 串行抽帧 + VL 调用，把当前 event 的 initial_caption 与 characters_in_event 作为文本输入。
 输出：stage2_refined.json，结构完全克隆 stage1 终产物，每个 event 增加 frame_caption / frame_timestamps 字段。
 断点续跑：每完成一个 event 即整体落盘；启动时若文件已存在，跳过已有 frame_caption 的 event。
 """
@@ -13,7 +13,7 @@ from typing import List
 from .config import PipelineConfig
 from .frame_extractor import get_event_frames_base64, get_event_frames_base64_qwen
 from .llm_client import request_llm_text_with_retry
-from .prompts.stage2_v1 import SYS_PROMPT_STAGE2, build_stage2_user_prompt
+from .prompts.stage2_v3 import SYS_PROMPT_STAGE2, build_stage2_user_prompt
 from .token_tracker import TokenTracker
 from .utils import parse_timestamp_to_seconds
 
@@ -107,18 +107,10 @@ def run_stage2(
         for ev_idx, ev in enumerate(ch.get("events", [])):
             flat_events.append((ch_idx, ev_idx, ev))
 
-    previous_caption = ""
-    last_chapter_idx = -1
-
     for global_idx, (ch_idx, ev_idx, ev) in enumerate(flat_events):
-        if ch_idx != last_chapter_idx:
-            previous_caption = ""
-            last_chapter_idx = ch_idx
-
         event_id = ev.get("event_id", f"ch{ch_idx+1}_ev{ev_idx+1}")
 
         if ev.get("frame_caption", ""):
-            previous_caption = ev["frame_caption"]
             continue
 
         start_sec = parse_timestamp_to_seconds(ev.get("start_time", ""))
@@ -163,9 +155,9 @@ def run_stage2(
             _log(video_tag, f"  ⚠️ [{event_id}] 抽帧失败 ({actual_start_sec:.2f}s → {end_sec:.2f}s)，跳过。")
             continue
 
-        prev_block = previous_caption if previous_caption else "无"
         initial_caption = ev.get("step3_synthesized_dense_caption", "")
-        user_text = build_stage2_user_prompt(prev_block, initial_caption)
+        characters_in_event = ev.get("characters_in_event", [])
+        user_text = build_stage2_user_prompt(initial_caption, characters_in_event)
         user_content = _build_user_content(base64_frames, timestamps, user_text)
 
         log_tag = f"[{video_tag}] Stage2 {event_id} ({len(base64_frames)}帧)" if video_tag else f"Stage2 {event_id}"
@@ -192,7 +184,6 @@ def run_stage2(
 
         ev["frame_caption"] = refined_text
         ev["frame_timestamps"] = [round(t, 3) for t in timestamps]
-        previous_caption = refined_text
 
         with open(out_path, 'w', encoding='utf-8') as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
