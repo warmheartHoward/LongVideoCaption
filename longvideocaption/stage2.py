@@ -2,7 +2,8 @@
 
 输入：stage1 终产物（pass3_final.json，含 chapters/events/step3_synthesized_dense_caption / characters_in_event）。
 处理：按 event 串行抽帧 + VL 调用，把当前 event 的 initial_caption 与 characters_in_event 作为文本输入。
-输出：stage2_refined.json，结构完全克隆 stage1 终产物，每个 event 增加 frame_caption / frame_timestamps 字段。
+输出：stage2_refined.json，结构完全克隆 stage1 终产物，每个 event 增加
+     frame_caption / frame_timestamps / frame_caption_output_tokens 字段。
 断点续跑：每完成一个 event 即整体落盘；启动时若文件已存在，跳过已有 frame_caption 的 event。
 """
 
@@ -44,6 +45,7 @@ def _clone_stage1_to_stage2(stage1_data: dict) -> dict:
             new_ev = dict(ev)
             new_ev.setdefault("frame_caption", "")
             new_ev.setdefault("frame_timestamps", [])
+            new_ev.setdefault("frame_caption_output_tokens", 0)
             new_ch["events"].append(new_ev)
         cloned["chapters"].append(new_ch)
     return cloned
@@ -60,6 +62,14 @@ def _build_user_content(
         content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
     content.append({"type": "text", "text": user_text})
     return content
+
+
+def _ensure_stage2_event_fields(state: dict) -> None:
+    for ch in state.get("chapters", []):
+        for ev in ch.get("events", []):
+            ev.setdefault("frame_caption", "")
+            ev.setdefault("frame_timestamps", [])
+            ev.setdefault("frame_caption_output_tokens", 0)
 
 
 def run_stage2(
@@ -88,6 +98,8 @@ def run_stage2(
     else:
         state = _clone_stage1_to_stage2(stage1_data)
 
+    _ensure_stage2_event_fields(state)
+
     chapters = state.get("chapters", [])
     total_events = sum(len(ch.get("events", [])) for ch in chapters)
     done_count = sum(
@@ -99,6 +111,8 @@ def run_stage2(
     _log(video_tag, "=" * 50)
 
     if done_count >= total_events and total_events > 0:
+        with open(out_path, 'w', encoding='utf-8') as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
         _log(video_tag, "⏭️  Stage 2 全部 event 已完成，跳过。")
         return out_path
 
@@ -162,7 +176,7 @@ def run_stage2(
 
         log_tag = f"[{video_tag}] Stage2 {event_id} ({len(base64_frames)}帧)" if video_tag else f"Stage2 {event_id}"
         try:
-            refined_text = request_llm_text_with_retry(
+            refined_text, usage = request_llm_text_with_retry(
                 client=client, model=cfg.model_name,
                 messages=[
                     {"role": "system", "content": SYS_PROMPT_STAGE2},
@@ -174,6 +188,7 @@ def run_stage2(
                 chunk_name=log_tag,
                 token_tracker=token_tracker,
                 stage=STAGE_NAME,
+                return_usage=True,
             )
         except Exception as e:
             if cfg.strict_failure:
@@ -184,6 +199,7 @@ def run_stage2(
 
         ev["frame_caption"] = refined_text
         ev["frame_timestamps"] = [round(t, 3) for t in timestamps]
+        ev["frame_caption_output_tokens"] = int(getattr(usage, "completion_tokens", 0) or 0)
 
         with open(out_path, 'w', encoding='utf-8') as f:
             json.dump(state, f, ensure_ascii=False, indent=2)

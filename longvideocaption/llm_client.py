@@ -77,6 +77,7 @@ def request_llm_text_with_retry(
     chunk_name="全局",
     token_tracker=None,
     stage="unknown",
+    return_usage=False,
 ):
     for attempt in range(1, max_retries + 1):
         try:
@@ -96,7 +97,10 @@ def request_llm_text_with_retry(
 
             raw_response_text = completion.choices[0].message.content or ""
             print(f"✅ [{chunk_name}] 调用成功 (耗时: {api_cost:.2f}秒)")
-            return raw_response_text.strip()
+            text = raw_response_text.strip()
+            if return_usage:
+                return text, usage
+            return text
 
         except Exception as e:
             print(f"⚠️ [{chunk_name}] API 请求异常 (尝试 {attempt}/{max_retries}): {str(e)}")
