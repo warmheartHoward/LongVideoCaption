@@ -27,7 +27,7 @@ from .utils import (
 
 PASS_NAME = "pass1_perception"
 PASS1_TIMESTAMP_MODES = ("second", "millisecond", "qwen_millisecond")
-_QWEN_SECONDS_RE = re.compile(r"^\s*<?\s*(\d+(?:\.\d+)?)\s*seconds\s*>?\s*$", re.IGNORECASE)
+_QWEN_SECONDS_RE = re.compile(r"^\s*<?\s*(\d+(?:\.\d+)?)(?:\s*seconds)?\s*>?\s*$", re.IGNORECASE)
 
 _log_context = threading.local()
 
@@ -38,8 +38,14 @@ def _log(video_tag: str, msg: str) -> None:
     log_path = getattr(_log_context, "log_file", None)
     if log_path:
         try:
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
+            fh = getattr(_log_context, "log_fh", None)
+            if fh is None or fh.name != log_path:
+                if fh is not None:
+                    fh.close()
+                fh = open(log_path, "a", encoding="utf-8")
+                _log_context.log_fh = fh
+            fh.write(line + "\n")
+            fh.flush()
         except Exception:
             pass
 
@@ -222,11 +228,16 @@ def _validate_and_snap_event_times(
         if target is None:
             _log(video_tag, f"  ⚠️ [时间戳校准] {label}={ts_str!r} 格式无效，丢弃对应 event")
             return None
+        nearest_str = nearest_sec = None
+        nearest_dist = float("inf")
         for wl_str, wl_sec in sorted_items:
-            if abs(wl_sec - target) < 0.01:
+            dist = abs(wl_sec - target)
+            if dist < 0.01:
                 return wl_str, wl_sec
-        nearest_str, nearest_sec = min(sorted_items, key=lambda p: abs(p[1] - target))
-        delta = abs(nearest_sec - target)
+            if dist < nearest_dist:
+                nearest_dist = dist
+                nearest_str, nearest_sec = wl_str, wl_sec
+        delta = nearest_dist
         _record_large_snap_delta(stats, delta, label)
         _log(video_tag, f"  ⚠️ [时间戳校准] {label}={ts_str} → {nearest_str} (Δ={delta:.2f}s)")
         return nearest_str, nearest_sec
@@ -278,7 +289,7 @@ def _validate_and_snap_event_times(
         ev["start_time"] = start_str
         ev["end_time"] = end_str
 
-        for kft in ev.get("key_frame_times", []) or []:
+        for kft in ev.get("key_frame_times", []):
             if not isinstance(kft, str):
                 continue
             kft_sec = parse_timestamp_to_seconds(kft)
@@ -335,7 +346,7 @@ def _flatten_events(global_results: list) -> list:
     flat = []
     for chunk_idx, chunk in enumerate(global_results):
         chunk_range = chunk.get("chunk_time_range", "")
-        for event_idx, ev in enumerate(chunk.get("data", {}).get("events", []) or []):
+        for event_idx, ev in enumerate((chunk.get("data") or {}).get("events", []) or []):
             start_sec = parse_timestamp_to_seconds(ev.get("start_time", ""))
             end_sec = parse_timestamp_to_seconds(ev.get("end_time", ""))
             flat.append({
@@ -346,7 +357,7 @@ def _flatten_events(global_results: list) -> list:
                 "end_time": ev.get("end_time", ""),
                 "start_sec": start_sec,
                 "end_sec": end_sec,
-                "key_frame_times": ev.get("key_frame_times", []) or [],
+                "key_frame_times": ev.get("key_frame_times", []),
             })
     flat.sort(key=lambda item: (item["start_sec"], item["end_sec"]))
     return flat
@@ -589,7 +600,7 @@ def _apply_prev_event_revision(chunk_data: dict, global_results: list, video_tag
         _log(video_tag, "⚠️ [修订跳过] 无上段 chunk 可供修订，忽略 prev_event_revision")
         return
 
-    prev_events = global_results[-1].get("data", {}).get("events", [])
+    prev_events = (global_results[-1].get("data") or {}).get("events", [])
     if not prev_events:
         _log(video_tag, "⚠️ [修订跳过] 上段 chunk 无 events，忽略 prev_event_revision")
         return
@@ -814,11 +825,22 @@ def _timestamp_sort_key(ts_str: str) -> float:
     return parse_timestamp_to_seconds(ts_str)
 
 
+_QWEN_HYBRID_STRIP_RE = re.compile(r"\s*<?\s*seconds\s*>?\s*$", re.IGNORECASE)
+_QWEN_MILLI_PAD_RE = re.compile(r"\.(\d{1,2})$")
+
+
 def _canonicalize_qwen_timestamp(ts_str: str) -> str:
+    # 1. Try pure qwen format: "12.5 seconds" / "<12.5 seconds>" / "12.5"
     qwen_sec = _parse_qwen_timestamp(ts_str)
     if qwen_sec is not None:
         return format_timestamp(qwen_sec)
-    strict_sec = parse_timestamp_to_seconds_strict(ts_str)
+
+    # 2. Strip trailing "seconds" suffix for hybrid formats like "00:02:31.1 seconds"
+    cleaned = _QWEN_HYBRID_STRIP_RE.sub("", ts_str.strip())
+    # 3. Pad milliseconds to 3 digits: "00:02:31.1" → "00:02:31.100"
+    cleaned = _QWEN_MILLI_PAD_RE.sub(lambda m: f".{m.group(1):0<3}", cleaned)
+
+    strict_sec = parse_timestamp_to_seconds_strict(cleaned)
     if strict_sec is not None:
         return format_timestamp(strict_sec)
     return ts_str
@@ -953,11 +975,11 @@ def run_pass1(
                 _log(video_tag, "🔄 检测到历史运行记录，尝试恢复断点...")
 
                 for idx, res in enumerate(global_results):
-                    summ = res.get("data", {}).get("chunk_summary", "")
+                    summ = (res.get("data") or {}).get("chunk_summary", "")
                     if summ:
                         history_summaries.append(f"第{idx+1}段: {summ}")
 
-                last_chunk = global_results[-1].get("data", {})
+                last_chunk = global_results[-1].get("data") or {}
                 last_events = last_chunk.get("events", [])
 
                 if last_events:
@@ -1112,7 +1134,7 @@ def run_pass1(
             )
 
             prev_events_before = (
-                global_results[-1].get("data", {}).get("events", [])
+                (global_results[-1].get("data") or {}).get("events", [])
                 if global_results else []
             )
             _apply_prev_event_revision(chunk_data, global_results, video_tag)
