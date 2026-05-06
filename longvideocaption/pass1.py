@@ -80,14 +80,24 @@ def _save_chunk_prompt(
         print(f"⚠️ 保存 chunk prompt 失败: {e}")
 
 
-def _format_overlap_events(events_slice: list) -> str:
+def _storage_str_to_prompt_str(ts_str: str, cfg: PipelineConfig) -> str:
+    """将存储格式的时间戳字符串转换为 prompt 格式（qwen 模式下为 'x.x seconds'）。"""
+    seconds = parse_timestamp_to_seconds(ts_str)
+    if seconds <= 0:
+        return ts_str
+    return _format_pass1_prompt_timestamp(seconds, cfg)
+
+
+def _format_overlap_events(events_slice: list, cfg: PipelineConfig) -> str:
     """把重叠区间内的 event 完整字段展平成可读文本，供下一段模型参考。"""
     if not events_slice:
         return "（无）"
     blocks = []
     for idx, ev in enumerate(events_slice, 1):
+        start = _storage_str_to_prompt_str(ev.get("start_time", ""), cfg)
+        end = _storage_str_to_prompt_str(ev.get("end_time", ""), cfg)
         blocks.append(
-            f"--- 上段重叠 Event #{idx} [{ev.get('start_time', '')} ~ {ev.get('end_time', '')}] ---\n"
+            f"--- 上段重叠 Event #{idx} [{start} ~ {end}] ---\n"
             f"step1_objective_visual:\n{ev.get('step1_objective_visual', '')}\n"
             f"step2_contextual_reasoning:\n{ev.get('step2_contextual_reasoning', '')}\n"
             f"step3_synthesized_dense_caption:\n{ev.get('step3_synthesized_dense_caption', '')}"
@@ -102,31 +112,41 @@ def _build_previous_context(
     next_chunk_start_sec: float,
     overlap_active: bool,
     overlap_events: Optional[list] = None,
+    cfg: Optional[PipelineConfig] = None,
 ) -> str:
     accumulated_story = "\n".join(history_summaries) if history_summaries else "暂无"
+    prompt_start = (
+        _format_pass1_prompt_timestamp(next_chunk_start_sec, cfg)
+        if cfg is not None
+        else format_timestamp(next_chunk_start_sec)
+    )
+    prompt_end = (
+        _storage_str_to_prompt_str(last_end_str, cfg)
+        if cfg is not None
+        else last_end_str
+    )
     if overlap_active:
-        overlap_text = _format_overlap_events(overlap_events or [])
+        overlap_text = _format_overlap_events(overlap_events or [], cfg) if cfg is not None else _format_overlap_events(overlap_events or [])
         return (
             f"【全局剧情脉络】:\n{accumulated_story}\n\n"
-            f"【⚠️ 视觉重叠回顾区间】：本片段画面 [{format_timestamp(next_chunk_start_sec)} ~ {last_end_str}] "
+            f"【⚠️ 视觉重叠回顾区间】：本片段画面 [{prompt_start} ~ {prompt_end}] "
             f"是上一片段最后若干个 event 的视觉回顾，仅作为前情上下文展示，**严禁对此区间重新创建 event**。\n\n"
             f"【⚠️ 跨chunk截断判定任务】：\n"
-            f"上段最后一个 event 的 end_time 为 {last_end_str}，恰好落在上段 chunk 边界。"
-            f"请结合本段开头画面，判断「上段重叠区间中 end_time 为 {last_end_str} 的那个 event」"
+            f"上段最后一个 event 的 end_time 为 {prompt_end}，恰好落在上段 chunk 边界。"
+            f"请结合本段开头画面，判断「上段重叠区间中 end_time 为 {prompt_end} 的那个 event」"
             f"的动作是否在上段已真正完成：\n"
-            f"  • 若已完成 → 顶层字段 `prev_event_revision` 填 null，events[0] 从 {last_end_str} 之后开始；\n"
+            f"  • 若已完成 → 顶层字段 `prev_event_revision` 填 null，events[0] 从 {prompt_end} 之后开始；\n"
             f"  • 若动作延续至本段（未完成） → 顶层字段 `prev_event_revision` 填修订对象"
             f"（结构见下方 JSON schema 说明），且 events[0] 必须从修订后的 end_time 之后开始，"
             f"严禁把延续部分再次作为独立 event 重复打标。\n\n"
             f"【上段重叠区间·完整 event 输出（step1/step2/step3 全量）】"
-            f"（仅作为上下文参考，禁止复写、改写或重新切分；新 event 必须从 {last_end_str} 之后开始）:\n"
+            f"（仅作为上下文参考，禁止复写、改写或重新切分；新 event 必须从 {prompt_end} 之后开始）:\n"
             f"{overlap_text}\n\n"
-            f"【当前接力要求】: 上一幕最后一个事件是：'{last_action}'，结束于 {last_end_str}。"
-            # f"请从 {last_end_str} 开始切分新事件，紧接着这个动作和时间点继续描述。"
+            f"【当前接力要求】: 上一幕最后一个事件是：'{last_action}'，结束于 {prompt_end}。"
         )
     return (
         f"【全局剧情脉络】:\n{accumulated_story}\n\n"
-        f"【当前无缝接力要求】: 上一幕的最后一个事件是：'{last_action}'，结束于 {last_end_str}。"
+        f"【当前无缝接力要求】: 上一幕的最后一个事件是：'{last_action}'，结束于 {prompt_end}。"
         f"请紧接着这个动作和时间点继续描述。"
     )
 
@@ -985,7 +1005,7 @@ def run_pass1(
                 if last_events:
                     chunk_start, last_end_str, last_action, overlap_active, overlap_events = _resume_from_progress(last_events, cfg)
                     previous_context = _build_previous_context(
-                        history_summaries, last_action, last_end_str, chunk_start, overlap_active, overlap_events
+                        history_summaries, last_action, last_end_str, chunk_start, overlap_active, overlap_events, cfg=cfg
                     )
                     _log(
                         video_tag,
@@ -1005,7 +1025,7 @@ def run_pass1(
 
     while chunk_start < total_duration:
         chunk_end = min(chunk_start + cfg.chunk_duration_sec, total_duration)
-        chunk_name = f"[{format_timestamp(chunk_start)} - {format_timestamp(chunk_end)}]"
+        chunk_name = f"[{_format_pass1_prompt_timestamp(chunk_start, cfg)} - {_format_pass1_prompt_timestamp(chunk_end, cfg)}]"
         log_tag = f"[{video_tag}] {chunk_name}" if video_tag else chunk_name
         _log(video_tag, f"\n=========================================")
         _log(video_tag, f"🚀 Pass 1 - 正在处理视频块: {chunk_name} | 模式: {cfg.input_payload_format}")
@@ -1173,22 +1193,20 @@ def run_pass1(
                     else:
                         _log(video_tag, f"🔗 [动态接力] 本段动作自然结束于 {format_timestamp(next_start)}，以此为下段起点。")
                     previous_context = _build_previous_context(
-                        history_summaries, last_action, last_end_str, next_start, overlap_active, overlap_events
+                        history_summaries, last_action, last_end_str, next_start, overlap_active, overlap_events, cfg=cfg
                     )
                 else:
                     last_ev = events[-1]
                     last_action = last_ev.get("step3_synthesized_dense_caption", "")
                     last_end_str = last_ev.get("end_time", "")
                     _log(video_tag, f"⚠️ [接力异常] 末尾时间不合理，启动 80% 安全重叠兜底推进。")
-                    accumulated_story = "\n".join(history_summaries) if history_summaries else "暂无"
-                    previous_context = (
-                        f"【全局剧情脉络】:\n{accumulated_story}\n\n"
-                        f"【当前无缝接力要求】: 上一幕的最后一个事件是：'{last_action}'，结束于 {last_end_str}。"
-                        f"请紧接着这个动作和时间点继续描述。"
+                    previous_context = _build_previous_context(
+                        history_summaries, last_action, last_end_str, next_start, False, None, cfg=cfg
                     )
             else:
                 _log(video_tag, "⚠️ [接力异常] 未提取到事件，启动 80% 安全重叠兜底推进。")
-                previous_context = f"【系统提示】: 上一片段解析异常，请直接从 {format_timestamp(next_start)} 开始重新捕捉动作。"
+                prompt_next = _format_pass1_prompt_timestamp(next_start, cfg)
+                previous_context = f"【系统提示】: 上一片段解析异常，请直接从 {prompt_next} 开始重新捕捉动作。"
 
         except Exception as e:
             if cfg.strict_failure:
