@@ -58,6 +58,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     p.add_argument("--conf-thresh", type=int, default=None, help="覆盖 pass2_confidence_threshold")
+
+    p.add_argument(
+        "--output-lang",
+        choices=["zh", "en"],
+        default=None,
+        help="Stage 3 输出语言：zh=中文（默认，落盘 stage3_polished.json）；en=英文（落盘 stage3_polished_en.json，同时翻译 video_summary / chapter_title / chapter_summary 与括号角色名）",
+    )
     return p
 
 
@@ -106,6 +113,9 @@ def main(argv=None) -> int:
 
     if args.conf_thresh is not None:
         cfg.pass2_confidence_threshold = args.conf_thresh
+
+    if args.output_lang is not None:
+        cfg.output_language = args.output_lang
 
     run_batch(cfg, args.input, args.output,
               video_root=args.video_root, video_jsonl=args.video_jsonl)

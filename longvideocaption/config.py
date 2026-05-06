@@ -56,6 +56,9 @@ class PipelineConfig:
 
     stage3_temperature: float = 0.4
     stage3_max_tokens: int = 65536
+    stage3_completeness_max_retries: int = 3
+
+    output_language: str = "zh"  # "zh" / "en"；en 模式下 Stage 3 输出英文，落盘 stage3_polished_en.json
 
     max_workers: int = 2
     stage1_only: bool = False

@@ -209,6 +209,16 @@ flowchart TB
 
 主要做：跨章节叙事缝合、指代统一去冗余、消除 "视频开头/纠正：xxx" 之类元描述与负向纠错痕迹。
 
+**多语言输出（`--output-lang`）**：
+
+- `zh`（默认）：保持原行为；落盘 `stage3_polished.json`。
+- `en`：使用专用英文 prompt（[prompts/stage3_v1_en.py](longvideocaption/prompts/stage3_v1_en.py)），把全片翻译为英文：
+  - 翻译范围：`video_summary` / 每个 chapter 的 `title` 与 `chapter_summary` / 每个 event 的 `final_caption`；
+  - 括号角色名（如 `[李雷]`）翻译为拼音音译保留括号（`[Li Lei]`），并通过 `pass2_global_bank.json` 的角色清单提示模型保持全片一致；
+  - 模型回包必须包含 `character_name_map`，落到 `stage3_confidence.character_name_map` 用于审计；
+  - 严格完整性校验（每个 event 都必须有 caption、每个 chapter 都必须有 title/summary、`character_name_map` 覆盖全部角色名）；失败按 `cfg.stage3_completeness_max_retries`（默认 3）重试整轮调用，耗尽即抛错（**不退回中文 frame_caption**）；
+  - 落盘 `stage3_polished_en.json`，与中文产物可在同一 run_dir 共存；Stages 1/2 不感知语言，只需重跑 Stage 3 即可补出英文版。
+
 ---
 
 ## LLM 调用约定
@@ -385,6 +395,7 @@ python main.py \
 | `--target-fps`    | video_base64 采样帧率                    | `1.0`                        |
 | `--pass1-timestamp-mode` | Pass 1 时间戳白名单格式：`second` / `millisecond` / `qwen_millisecond`（提示词用 `x.x seconds`，落盘仍为 `[hh:mm:ss.fff]`） | `second`                     |
 | `--conf-thresh`   | Pass 2 身份对齐置信度拦截阈值            | `80`                         |
+| `--output-lang`   | Stage 3 输出语言：`zh`（默认，落盘 `stage3_polished.json`）/ `en`（落盘 `stage3_polished_en.json`，同时翻译 `video_summary` / `chapter.title` / `chapter.chapter_summary` 与括号角色名为拼音音译） | `zh`                         |
 
 三个 stage flag 互斥，只能同时使用其中一个。不带任何 stage flag = 完整运行所有阶段。
 
