@@ -24,7 +24,7 @@ class PipelineConfig:
     pass1_timestamp_mode: str = "second"  # second / millisecond / qwen_millisecond
     llm_temperature: float = 0.2
     llm_max_tokens: int = 32768
-    prev_event_overlap_count: int = 0
+    prev_event_overlap_count: int = 1
 
     pass2_temperature: float = 0.1
     pass2_max_tokens: int = 32768
@@ -37,7 +37,7 @@ class PipelineConfig:
     pass2_review_max_frames_per_cluster: int = 3
     pass2_review_temperature: float = 0.1
     pass2_review_max_tokens: int = 32768
-    pass2_review_batch_size: int = 1  # 0 或负数 = 一次性全部；>0 = 每批最多 N 个聚类
+    pass2_review_batch_size: int = 0  # 0 或负数 = 一次性全部；>0 = 每批最多 N 个聚类
 
     pass3_temperature: float = 0.4
     pass3_max_tokens: int = 32768
