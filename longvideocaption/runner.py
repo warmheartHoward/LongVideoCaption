@@ -11,6 +11,10 @@ from .token_tracker import GlobalTokenAggregator
 
 def discover_videos(input_path: str, extensions: List[str]) -> List[str]:
     if os.path.isfile(input_path):
+        ext = os.path.splitext(input_path)[1].lower()
+        ext_set = {e.lower() for e in extensions}
+        if ext not in ext_set:
+            print(f"⚠️ 文件扩展名 {ext!r} 不在视频扩展名列表中，仍将尝试处理: {input_path}")
         return [input_path]
 
     if not os.path.isdir(input_path):
@@ -26,11 +30,48 @@ def discover_videos(input_path: str, extensions: List[str]) -> List[str]:
     return videos
 
 
-def run_batch(cfg: PipelineConfig, input_path: str, output_root: str) -> dict:
+def discover_videos_from_jsonl(video_root: str, video_jsonl_path: str) -> List[str]:
+    if not os.path.isfile(video_jsonl_path):
+        raise FileNotFoundError(f"JSONL 文件不存在: {video_jsonl_path}")
+    if not os.path.isdir(video_root):
+        raise FileNotFoundError(f"video_root 目录不存在: {video_root}")
+
+    videos = []
+    with open(video_jsonl_path, 'r', encoding='utf-8') as f:
+        for line_no, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError as e:
+                print(f"⚠️ [video_jsonl] 第 {line_no} 行 JSON 解析失败，跳过: {e}")
+                continue
+            rel_path = entry.get("video_path", "")
+            if not rel_path:
+                print(f"⚠️ [video_jsonl] 第 {line_no} 行缺少 video_path，跳过")
+                continue
+            abs_path = os.path.join(video_root, rel_path)
+            if not os.path.isfile(abs_path):
+                print(f"⚠️ [video_jsonl] 文件不存在，跳过: {abs_path}")
+                continue
+            videos.append(abs_path)
+    return videos
+
+
+def run_batch(cfg: PipelineConfig, input_path: str, output_root: str,
+             video_root: str = None, video_jsonl: str = None) -> dict:
     os.makedirs(output_root, exist_ok=True)
-    videos = discover_videos(input_path, cfg.video_extensions)
+
+    if video_root and video_jsonl:
+        videos = discover_videos_from_jsonl(video_root, video_jsonl)
+    elif input_path:
+        videos = discover_videos(input_path, cfg.video_extensions)
+    else:
+        raise ValueError("必须提供 input_path 或 (video_root + video_jsonl)")
+
     if not videos:
-        print(f"⚠️ 在 {input_path} 未发现任何视频文件。")
+        print(f"⚠️ 未发现任何视频文件。")
         return {"videos": [], "aggregate_tokens": {}}
 
     print(f"\n🎯 发现 {len(videos)} 个视频，并发度 = {cfg.max_workers}")
@@ -41,6 +82,8 @@ def run_batch(cfg: PipelineConfig, input_path: str, output_root: str) -> dict:
     summary = {
         "started_at": datetime.now().isoformat(timespec="seconds"),
         "input": input_path,
+        "video_root": video_root,
+        "video_jsonl": video_jsonl,
         "output_root": output_root,
         "max_workers": cfg.max_workers,
         "videos": [],

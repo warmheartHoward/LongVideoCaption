@@ -104,6 +104,10 @@ def get_base64_frames_qwen(
     return_visual_tokens: bool = False,
 ) -> Tuple[List[float], List[str]]:
     cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        if return_visual_tokens:
+            return [], [], 0
+        return [], []
     orig_fps = cap.get(cv2.CAP_PROP_FPS)
     orig_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
     orig_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
@@ -137,6 +141,8 @@ def get_base64_frames(
     jpg_quality: int,
 ) -> Tuple[List[float], List[str]]:
     cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return [], []
     orig_fps = cap.get(cv2.CAP_PROP_FPS)
     orig_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
     orig_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
@@ -167,6 +173,8 @@ def get_raw_chunk_video_base64(
     temp_dir: str = ".",
 ) -> Tuple[List[float], str]:
     cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return [], ""
     orig_fps = cap.get(cv2.CAP_PROP_FPS)
     orig_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
     orig_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)

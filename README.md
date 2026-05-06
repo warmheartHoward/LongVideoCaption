@@ -1,7 +1,7 @@
 # Long Video Caption v2
 
 长视频结构化打标流水线，五个阶段串行：**视觉感知 → 身份对齐 → 章节聚合 → 帧级精修 → 全局润色**。
-支持文件夹批量、多线程并发、按内容稳定路径的细粒度断点续打、分阶段 Token 统计，并在 JSON 输出阶段启用 JSON object 模式。
+支持文件夹批量、多线程并发、按内容稳定路径的细粒度断点续打、分阶段 Token 统计、JSONL 清单输入，并在 JSON 输出阶段启用 JSON object 模式。
 
 ---
 
@@ -9,12 +9,14 @@
 
 ```mermaid
 flowchart TB
-    CLI["CLI main.py<br/>--input、--output、--workers"] --> Runner
+    CLI["CLI main.py<br/>--input 或 --video-root+--video-jsonl<br/>--output、--workers"] --> Runner
 
     subgraph Runner["runner.run_batch"]
         Disc["discover_videos<br/>递归扫描 + mtime 排序"]
-        Pool{"ThreadPoolExecutor<br/>max_workers 并发"}
+        Jsonl["discover_videos_from_jsonl<br/>JSONL 相对路径 + video_root 拼接"]
         Disc --> Pool
+        Jsonl --> Pool
+        Pool{"ThreadPoolExecutor<br/>max_workers 并发"}
     end
 
     Pool -.->|"每视频一个 worker 线程"| Pipe1["process_single_video"]
@@ -252,7 +254,7 @@ LongVideoCaption_v2/
     ├── stage2_parallel.py        # Stage 2 并行版事件级帧精修（pipeline 默认使用）
     ├── stage3.py                 # Stage 3 全局润色
     ├── pipeline.py               # 单视频串联 5 阶段
-    ├── runner.py                 # 文件夹扫描 + ThreadPoolExecutor
+    ├── runner.py                 # 文件夹扫描 / JSONL 清单 + ThreadPoolExecutor
     └── prompts/                  # pass1_v3 / stage2_v1 / stage3_v1 prompts
 ```
 
@@ -287,6 +289,27 @@ python main.py \
   --workers 3 \
   --api-key YOUR_KEY \
   --base-url https://az.gptplus5.com/v1
+```
+
+### JSONL 清单输入
+
+通过 JSONL 文件指定待处理视频列表，配合 `--video-root` 拼接绝对路径，适合从外部系统导出清单后精准控制范围：
+
+```bash
+python main.py \
+  --video-root D:/videos \
+  --video-jsonl D:/manifest.jsonl \
+  --output D:/outputs_v2 \
+  --workers 3 \
+  --api-key YOUR_KEY \
+  --base-url https://az.gptplus5.com/v1
+```
+
+`manifest.jsonl` 格式（每行一个 JSON 对象，`video_path` 为相对于 `--video-root` 的路径）：
+
+```jsonl
+{"video_path": "subdir/video1.mp4"}
+{"video_path": "subdir/video2.mp4"}
 ```
 
 ### 分阶段批量处理（推荐用于生产）
@@ -333,8 +356,10 @@ python main.py \
 
 | 参数              | 说明                                     | 默认                         |
 |-------------------|------------------------------------------|------------------------------|
-| `--input`         | 视频文件 **或** 文件夹（必填）           | —                            |
+| `--input`         | 视频文件或文件夹路径（与 `--video-root + --video-jsonl` 二选一） | —                            |
 | `--output`        | 输出根目录（必填）                       | —                            |
+| `--video-root`    | 视频根目录，与 `--video-jsonl` 配合使用  | —                            |
+| `--video-jsonl`   | JSONL 清单文件，每行 `{"video_path": "相对路径"}` | —                            |
 | `--workers`       | 并发视频数                               | `2`                          |
 | `--stage1-only`   | 只运行 Stage 1（Pass1 + Pass2 + Pass3），生成 `pass3_final.json` 后停止 | `False`                      |
 | `--stage2-only`   | 跳过 Stage 1，仅运行 Stage 2（帧精修），需 `pass3_final.json` 已存在 | `False`                      |
@@ -352,6 +377,8 @@ python main.py \
 | `--conf-thresh`   | Pass 2 身份对齐置信度拦截阈值            | `80`                         |
 
 三个 stage flag 互斥，只能同时使用其中一个。不带任何 stage flag = 完整运行所有阶段。
+
+`--input` 与 `--video-root + --video-jsonl` 二选一，同时提供时 JSONL 模式优先。
 
 进阶超参（Stage 2/3 的 fps、max_frames、temperature、max_tokens 等）在 `longvideocaption/config.py` 的 `PipelineConfig` 里改默认值。Stage 2 并行相关参数包括 `stage2_parallel_max_workers`（非 qwen 最大并行请求数，默认 `4`）、`stage2_qwen_parallel_max_workers`（qwen 线程池安全上限，默认 `32`）和 `stage2_qwen_parallel_visual_token_budget`（qwen 同时在飞请求的视觉 token 预算，默认 `128 * 1024`）。
 

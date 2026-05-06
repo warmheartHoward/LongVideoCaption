@@ -48,6 +48,9 @@ def resolve_run_dir(cfg: PipelineConfig, video_path: str, output_root: str) -> s
 
 
 def process_single_video(cfg: PipelineConfig, video_path: str, output_root: str) -> dict:
+    if not os.path.isfile(video_path):
+        raise FileNotFoundError(f"视频文件不存在: {video_path}")
+
     video_tag = sanitize_filename(os.path.splitext(os.path.basename(video_path))[0])
     run_dir = resolve_run_dir(cfg, video_path, output_root)
     os.makedirs(run_dir, exist_ok=True)

@@ -13,8 +13,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="Long Video Caption — 三遍扫描式长视频打标（支持文件夹批量 + 多线程 + 断点续打）"
     )
-    p.add_argument("--input", required=True, help="视频文件或文件夹路径")
+    p.add_argument("--input", default=None, help="视频文件或文件夹路径")
     p.add_argument("--output", required=True, help="输出根目录")
+    p.add_argument("--video-root", default=None, help="视频根目录（与 --video-jsonl 配合使用）")
+    p.add_argument("--video-jsonl", default=None, help="JSONL 文件，每行 dict[\"video_path\"] 为相对路径，与 --video-root 拼接为绝对路径")
     p.add_argument("--workers", type=int, default=2, help="并发视频数（默认 2）")
     stage_group = p.add_mutually_exclusive_group()
     stage_group.add_argument(
@@ -61,6 +63,15 @@ def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    jsonl_mode = bool(args.video_root and args.video_jsonl)
+    input_mode = bool(args.input)
+    if not input_mode and not jsonl_mode:
+        parser.error("必须提供 --input 或 (--video-root + --video-jsonl)")
+    if jsonl_mode and not args.video_root:
+        parser.error("--video-jsonl 需要配合 --video-root 使用")
+    if jsonl_mode and not args.video_jsonl:
+        parser.error("--video-root 需要配合 --video-jsonl 使用")
+
     cfg = PipelineConfig()
     cfg.max_workers = max(1, args.workers)
     cfg.stage1_only = bool(args.stage1_only)
@@ -92,7 +103,8 @@ def main(argv=None) -> int:
     if args.conf_thresh is not None:
         cfg.pass2_confidence_threshold = args.conf_thresh
 
-    run_batch(cfg, args.input, args.output)
+    run_batch(cfg, args.input, args.output,
+              video_root=args.video_root, video_jsonl=args.video_jsonl)
     return 0
 
 
