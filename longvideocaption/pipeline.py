@@ -98,6 +98,43 @@ def process_single_video(cfg: PipelineConfig, video_path: str, output_root: str)
     try:
         print(f"\n{'#' * 70}\n# [{video_tag}] 处理视频: {video_path}\n# [{video_tag}] 运行目录: {run_dir}\n{'#' * 70}")
 
+        # ── Stage 3 only：跳过 Stage 1 + Stage 2 ──
+        if cfg.stage3_only:
+            stage2_path = os.path.join(run_dir, "stage2_refined.json")
+            if not os.path.exists(stage2_path):
+                raise FileNotFoundError(
+                    f"stage3_only 需要 stage2_refined.json，但未找到: {stage2_path}"
+                )
+            result["artifacts"]["stage2_refined"] = stage2_path
+            print(f"⏭️  [{video_tag}] stage3_only=True，跳过 Stage 1 / Stage 2。")
+
+            with tracker.stage_timer("stage3_global_polish"):
+                stage3_path = run_stage3(cfg, stage2_path, run_dir, client, tracker, video_tag=video_tag)
+            result["artifacts"]["stage3_polished"] = stage3_path
+
+            this_run["status"] = "completed"
+            result["status"] = "completed"
+            return result
+
+        # ── Stage 2 only：跳过 Stage 1 ──
+        if cfg.stage2_only:
+            final_path = os.path.join(run_dir, "pass3_final.json")
+            if not os.path.exists(final_path):
+                raise FileNotFoundError(
+                    f"stage2_only 需要 pass3_final.json，但未找到: {final_path}"
+                )
+            result["artifacts"]["pass3_final"] = final_path
+            print(f"⏭️  [{video_tag}] stage2_only=True，跳过 Stage 1。")
+
+            with tracker.stage_timer("stage2_frame_inspection"):
+                stage2_path = run_stage2(cfg, video_path, final_path, run_dir, client, tracker, video_tag=video_tag)
+            result["artifacts"]["stage2_refined"] = stage2_path
+
+            this_run["status"] = "completed"
+            result["status"] = "completed"
+            return result
+
+        # ── 完整 Stage 1（默认 / --stage1-only） ──
         with tracker.stage_timer("pass1_perception"):
             pass1_path = run_pass1(cfg, video_path, run_dir, client, tracker, video_tag=video_tag)
         result["artifacts"]["pass1_progress"] = pass1_path
@@ -110,6 +147,13 @@ def process_single_video(cfg: PipelineConfig, video_path: str, output_root: str)
         with tracker.stage_timer("pass3_aggregation"):
             final_path = run_pass3(cfg, video_path, aligned_path, run_dir, client, tracker, video_tag=video_tag)
         result["artifacts"]["pass3_final"] = final_path
+
+        if cfg.stage1_only:
+            print(f"⏭️  [{video_tag}] stage1_only=True，已生成 pass3_final.json，跳过 Stage 2 / Stage 3。")
+            this_run["status"] = "completed"
+            result["status"] = "completed"
+            result["artifacts"]["stage1_final"] = final_path
+            return result
 
         with tracker.stage_timer("stage2_frame_inspection"):
             stage2_path = run_stage2(cfg, video_path, final_path, run_dir, client, tracker, video_tag=video_tag)

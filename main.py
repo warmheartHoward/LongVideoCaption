@@ -16,6 +16,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--input", required=True, help="视频文件或文件夹路径")
     p.add_argument("--output", required=True, help="输出根目录")
     p.add_argument("--workers", type=int, default=2, help="并发视频数（默认 2）")
+    stage_group = p.add_mutually_exclusive_group()
+    stage_group.add_argument(
+        "--stage1-only",
+        action="store_true",
+        help="只运行 Stage 1（Pass1 + Pass2 + Pass3），生成 pass3_final.json 后停止",
+    )
+    stage_group.add_argument(
+        "--stage2-only",
+        action="store_true",
+        help="跳过 Stage 1，仅运行 Stage 2（帧精修），需 pass3_final.json 已存在",
+    )
+    stage_group.add_argument(
+        "--stage3-only",
+        action="store_true",
+        help="跳过 Stage 1 和 Stage 2，仅运行 Stage 3（全局润色），需 stage2_refined.json 已存在",
+    )
 
     p.add_argument("--model", default=None, help="覆盖 model_name")
     p.add_argument("--api-key", default=None, help="覆盖 api_key")
@@ -47,6 +63,9 @@ def main(argv=None) -> int:
 
     cfg = PipelineConfig()
     cfg.max_workers = max(1, args.workers)
+    cfg.stage1_only = bool(args.stage1_only)
+    cfg.stage2_only = bool(args.stage2_only)
+    cfg.stage3_only = bool(args.stage3_only)
 
     if args.model is not None:
         cfg.model_name = args.model

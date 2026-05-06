@@ -52,6 +52,10 @@ flowchart TB
 ```
 
 > ★ `stage3_polished.json` 是最终交付产物；`pass3_final.json` 是不带 frame-level 精修的中间稳定版本（也可单独消费）。
+> 三阶段可独立运行，便于针对性设置 LLM 部署参数：
+> - `--stage1-only`：仅运行 Stage 1（Pass1 + Pass2 + Pass3），生成 `pass3_final.json` 后停止。
+> - `--stage2-only`：跳过 Stage 1，仅运行 Stage 2（帧精修），需 `pass3_final.json` 已存在。
+> - `--stage3-only`：跳过 Stage 1 和 Stage 2，仅运行 Stage 3（全局润色），需 `stage2_refined.json` 已存在。
 
 ---
 
@@ -215,6 +219,7 @@ Stage 2 使用 `request_llm_text_with_retry`，输出是单段纯文本，不开
 ## 断点续打矩阵
 
 路径按内容（视频名 + 超参签名）稳定 → **重跑同样的命令即自动续打**，不需要任何特殊参数。
+如果命令带 `--stage1-only`、`--stage2-only` 或 `--stage3-only`，重跑范围限定在对应阶段内。
 
 | 删除（或不存在）的文件                                 | 重跑范围                                            |
 |--------------------------------------------------------|-----------------------------------------------------|
@@ -284,6 +289,35 @@ python main.py \
   --base-url https://az.gptplus5.com/v1
 ```
 
+### 分阶段批量处理（推荐用于生产）
+
+三阶段各自独立运行，可针对性切换模型和调整并发，充分利用不同 LLM 部署的资源：
+
+```bash
+# 第一阶段：视觉感知（长序列多模态，串行 per-video，用高并发视频数）
+python main.py \
+  --input D:/videos --output D:/outputs_v2 \
+  --workers 4 --model gemini-3.1-pro-preview \
+  --api-key YOUR_KEY --base-url https://az.gptplus5.com/v1 \
+  --stage1-only
+
+# 第二阶段：帧级精修（短序列多模态，per-video 内部并行，用轻量模型）
+python main.py \
+  --input D:/videos --output D:/outputs_v2 \
+  --workers 2 --model gemini-3.1-flash \
+  --api-key YOUR_KEY --base-url https://az.gptplus5.com/v1 \
+  --stage2-only
+
+# 第三阶段：全局润色（纯文本长序列，单次调用 per-video，用最强的文本模型）
+python main.py \
+  --input D:/videos --output D:/outputs_v2 \
+  --workers 1 --model deepseek-v4-pro \
+  --api-key YOUR_KEY --base-url https://az.gptplus5.com/v1 \
+  --stage3-only
+```
+
+> **关键约束**：分阶段运行时 `--input` 与 `--output` 必须保持不变，`resolve_run_dir` 才能正确找到前序阶段的产物文件。如果某视频缺失前置产物，会直接报错而非静默跳过。
+
 ### VSCode 调试
 
 `.vscode/launch.json` 里已预置三条配置：
@@ -302,6 +336,9 @@ python main.py \
 | `--input`         | 视频文件 **或** 文件夹（必填）           | —                            |
 | `--output`        | 输出根目录（必填）                       | —                            |
 | `--workers`       | 并发视频数                               | `2`                          |
+| `--stage1-only`   | 只运行 Stage 1（Pass1 + Pass2 + Pass3），生成 `pass3_final.json` 后停止 | `False`                      |
+| `--stage2-only`   | 跳过 Stage 1，仅运行 Stage 2（帧精修），需 `pass3_final.json` 已存在 | `False`                      |
+| `--stage3-only`   | 跳过 Stage 1 和 Stage 2，仅运行 Stage 3（全局润色），需 `stage2_refined.json` 已存在 | `False`                      |
 | `--api-key`       | OpenAI 兼容 API key                      | 空（必须传或改 config.py）   |
 | `--base-url`      | API base URL                             | 空（必须传或改 config.py）   |
 | `--model`         | 模型名                                   | `gemini-3.1-pro-preview`     |
@@ -313,6 +350,8 @@ python main.py \
 | `--target-fps`    | video_base64 采样帧率                    | `1.0`                        |
 | `--pass1-timestamp-mode` | Pass 1 时间戳白名单格式：`second` / `millisecond` / `qwen_millisecond`（提示词用 `x.x seconds`，落盘仍为 `[hh:mm:ss.fff]`） | `second`                     |
 | `--conf-thresh`   | Pass 2 身份对齐置信度拦截阈值            | `80`                         |
+
+三个 stage flag 互斥，只能同时使用其中一个。不带任何 stage flag = 完整运行所有阶段。
 
 进阶超参（Stage 2/3 的 fps、max_frames、temperature、max_tokens 等）在 `longvideocaption/config.py` 的 `PipelineConfig` 里改默认值。Stage 2 并行相关参数包括 `stage2_parallel_max_workers`（非 qwen 最大并行请求数，默认 `4`）、`stage2_qwen_parallel_max_workers`（qwen 线程池安全上限，默认 `32`）和 `stage2_qwen_parallel_visual_token_budget`（qwen 同时在飞请求的视觉 token 预算，默认 `128 * 1024`）。
 

@@ -36,8 +36,8 @@ class PipelineConfig:
     pass2_review_jpg_quality: int = 95
     pass2_review_max_frames_per_cluster: int = 3
     pass2_review_temperature: float = 0.1
-    pass2_review_max_tokens: int = 8192
-    pass2_review_batch_size: int = 0  # 0 或负数 = 一次性全部；>0 = 每批最多 N 个聚类
+    pass2_review_max_tokens: int = 32768
+    pass2_review_batch_size: int = 1  # 0 或负数 = 一次性全部；>0 = 每批最多 N 个聚类
 
     pass3_temperature: float = 0.4
     pass3_max_tokens: int = 32768
@@ -46,18 +46,21 @@ class PipelineConfig:
     stage2_max_frames: int = 1200
     stage2_temperature: float = 0.2
     stage2_max_tokens: int = 16384
-    stage2_adjust_start_offset: float = 0.5
+    stage2_adjust_start_offset: float = 0.0
     stage2_frame_max_width: int = 960
     stage2_max_total_pixels: int = 128 * 1024 * 32 * 32
     stage2_frame_jpg_quality: int = 95
     stage2_parallel_max_workers: int = 4
     stage2_qwen_parallel_max_workers: int = 32
-    stage2_qwen_parallel_visual_token_budget: int = 128 * 1024
+    stage2_qwen_parallel_visual_token_budget: int = 160 * 1024
 
     stage3_temperature: float = 0.4
     stage3_max_tokens: int = 65536
 
     max_workers: int = 2
+    stage1_only: bool = False
+    stage2_only: bool = False
+    stage3_only: bool = False
 
     strict_failure: bool = True
     video_extensions: List[str] = field(
