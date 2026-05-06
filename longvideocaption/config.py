@@ -1,7 +1,44 @@
 from dataclasses import dataclass, field, asdict
-from typing import List
+from typing import List, Optional
 
 from .utils import sanitize_filename
+
+
+STAGE_NAMES = ("stage1", "stage2", "stage3")
+
+
+def normalize_stages(stages: Optional[List[str]]) -> Optional[List[str]]:
+    """归一化 + 校验 stages 选择。
+
+    - None / 空 → None（跑完整 pipeline）
+    - 必须是 STAGE_NAMES 子集
+    - 必须连续（stage1 / stage1,stage2 / stage1,stage2,stage3 / stage2 /
+      stage2,stage3 / stage3），不允许 stage1+stage3 跳段
+    """
+    if not stages:
+        return None
+    norm = []
+    seen = set()
+    for s in stages:
+        key = (s or "").strip().lower()
+        if not key:
+            continue
+        if key not in STAGE_NAMES:
+            raise ValueError(f"未知 stage: {s!r}，可选: {STAGE_NAMES}")
+        if key in seen:
+            continue
+        seen.add(key)
+        norm.append(key)
+    if not norm:
+        return None
+    norm.sort(key=STAGE_NAMES.index)
+    indices = [STAGE_NAMES.index(s) for s in norm]
+    if indices != list(range(indices[0], indices[-1] + 1)):
+        raise ValueError(
+            f"stages 必须是连续区间，不允许跳段: {norm}（合法: stage1 / stage1,stage2 / "
+            f"stage1,stage2,stage3 / stage2 / stage2,stage3 / stage3）"
+        )
+    return norm
 
 
 @dataclass
@@ -58,6 +95,17 @@ class PipelineConfig:
     stage3_max_tokens: int = 65536
 
     max_workers: int = 2
+
+    # 限制只跑指定 stage 子集；None 表示完整 pipeline。
+    # 合法取值：stage1 (Pass1+2+3 → pass3_final.json) / stage2 (帧精修 → stage2_refined.json) /
+    # stage3 (全局润色 → stage3_polished.json)。仅允许连续区间。
+    stages: Optional[List[str]] = None
+
+    # 显式覆盖 run_dir 的 hyper_sig 段。设置后 run_dir = {output}/{video}/{resume_hyper_sig}/，
+    # 不再调 hyper_signature(cfg)。典型用途：stage2/stage3 想换模型续跑（模型变了 hyper_signature
+    # 会变，导致找不到上游 pass3_final.json/stage2_refined.json），手工传入 stage1 时的 hyper_sig
+    # 即可继续。批量场景下对每个视频都生效。
+    resume_hyper_sig: Optional[str] = None
 
     strict_failure: bool = True
     video_extensions: List[str] = field(

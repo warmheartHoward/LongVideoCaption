@@ -2,7 +2,7 @@ import argparse
 import sys
 import warnings
 
-from longvideocaption.config import PipelineConfig
+from longvideocaption.config import PipelineConfig, normalize_stages
 from longvideocaption.runner import run_batch
 
 
@@ -38,6 +38,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     p.add_argument("--conf-thresh", type=int, default=None, help="覆盖 pass2_confidence_threshold")
+    p.add_argument(
+        "--resume-hyper-sig",
+        default=None,
+        help=(
+            "显式指定 run_dir 的 hyper_sig 段（即 {output}/{video}/<这一段>/）。"
+            "设置后将绕过 hyper_signature(cfg) 计算。"
+            "典型用途：stage2/stage3 想换模型续跑时，传入 stage1 跑时的 hyper_sig 以复用上游产物。"
+            "批量模式下对所有视频生效。"
+        ),
+    )
+    p.add_argument(
+        "--stages",
+        default=None,
+        help=(
+            "限定只跑哪些 stage，逗号分隔，必须是连续区间。"
+            "可选值: stage1 (Pass1+2+3 → pass3_final.json) / "
+            "stage2 (帧精修 → stage2_refined.json) / stage3 (全局润色 → stage3_polished.json)。"
+            "示例: --stages stage2 / --stages stage2,stage3。"
+            "不传则跑完整 pipeline。"
+        ),
+    )
     return p
 
 
@@ -72,6 +93,12 @@ def main(argv=None) -> int:
 
     if args.conf_thresh is not None:
         cfg.pass2_confidence_threshold = args.conf_thresh
+
+    if args.stages is not None:
+        cfg.stages = normalize_stages([s for s in args.stages.split(",") if s.strip()])
+
+    if args.resume_hyper_sig is not None:
+        cfg.resume_hyper_sig = args.resume_hyper_sig.strip() or None
 
     run_batch(cfg, args.input, args.output)
     return 0

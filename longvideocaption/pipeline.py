@@ -4,7 +4,7 @@ import time
 import traceback
 from datetime import datetime
 
-from .config import PipelineConfig, hyper_signature
+from .config import PipelineConfig, hyper_signature, normalize_stages
 from .llm_client import build_client
 from .pass1 import run_pass1
 from .pass2 import run_pass2
@@ -40,10 +40,11 @@ def _write_meta(path: str, meta: dict) -> None:
 
 def resolve_run_dir(cfg: PipelineConfig, video_path: str, output_root: str) -> str:
     video_basename = os.path.splitext(os.path.basename(video_path))[0]
+    sig = (cfg.resume_hyper_sig or "").strip() or hyper_signature(cfg)
     return os.path.join(
         output_root,
         sanitize_filename(video_basename),
-        hyper_signature(cfg),
+        sig,
     )
 
 
@@ -98,26 +99,53 @@ def process_single_video(cfg: PipelineConfig, video_path: str, output_root: str)
     try:
         print(f"\n{'#' * 70}\n# [{video_tag}] 处理视频: {video_path}\n# [{video_tag}] 运行目录: {run_dir}\n{'#' * 70}")
 
-        with tracker.stage_timer("pass1_perception"):
-            pass1_path = run_pass1(cfg, video_path, run_dir, client, tracker, video_tag=video_tag)
-        result["artifacts"]["pass1_progress"] = pass1_path
+        selected_stages = normalize_stages(cfg.stages)
+        run_stage1 = selected_stages is None or "stage1" in selected_stages
+        run_stage2_flag = selected_stages is None or "stage2" in selected_stages
+        run_stage3_flag = selected_stages is None or "stage3" in selected_stages
+        if selected_stages is not None:
+            print(f"# [{video_tag}] 仅执行 stages: {selected_stages}")
 
-        # pass2 内部分别计时 pass2_alignment 和 pass2_review
-        aligned_path, bank_path = run_pass2(cfg, video_path, pass1_path, run_dir, client, tracker, video_tag=video_tag)
-        result["artifacts"]["pass2_aligned"] = aligned_path
-        result["artifacts"]["pass2_global_bank"] = bank_path
+        pass3_final_path = os.path.join(run_dir, "pass3_final.json")
+        stage2_refined_path = os.path.join(run_dir, "stage2_refined.json")
 
-        with tracker.stage_timer("pass3_aggregation"):
-            final_path = run_pass3(cfg, video_path, aligned_path, run_dir, client, tracker, video_tag=video_tag)
-        result["artifacts"]["pass3_final"] = final_path
+        if run_stage1:
+            with tracker.stage_timer("pass1_perception"):
+                pass1_path = run_pass1(cfg, video_path, run_dir, client, tracker, video_tag=video_tag)
+            result["artifacts"]["pass1_progress"] = pass1_path
 
-        with tracker.stage_timer("stage2_frame_inspection"):
-            stage2_path = run_stage2(cfg, video_path, final_path, run_dir, client, tracker, video_tag=video_tag)
-        result["artifacts"]["stage2_refined"] = stage2_path
+            # pass2 内部分别计时 pass2_alignment 和 pass2_review
+            aligned_path, bank_path = run_pass2(cfg, video_path, pass1_path, run_dir, client, tracker, video_tag=video_tag)
+            result["artifacts"]["pass2_aligned"] = aligned_path
+            result["artifacts"]["pass2_global_bank"] = bank_path
 
-        with tracker.stage_timer("stage3_global_polish"):
-            stage3_path = run_stage3(cfg, stage2_path, run_dir, client, tracker, video_tag=video_tag)
-        result["artifacts"]["stage3_polished"] = stage3_path
+            with tracker.stage_timer("pass3_aggregation"):
+                final_path = run_pass3(cfg, video_path, aligned_path, run_dir, client, tracker, video_tag=video_tag)
+            result["artifacts"]["pass3_final"] = final_path
+        else:
+            final_path = pass3_final_path
+
+        if run_stage2_flag:
+            if not os.path.exists(final_path):
+                raise FileNotFoundError(
+                    f"Stage 2 需要上游产物 pass3_final.json，但未在 {run_dir} 找到。"
+                    f"请先以相同超参运行 stage1（或加入 --stages stage1,stage2）。"
+                )
+            with tracker.stage_timer("stage2_frame_inspection"):
+                stage2_path = run_stage2(cfg, video_path, final_path, run_dir, client, tracker, video_tag=video_tag)
+            result["artifacts"]["stage2_refined"] = stage2_path
+        else:
+            stage2_path = stage2_refined_path
+
+        if run_stage3_flag:
+            if not os.path.exists(stage2_path):
+                raise FileNotFoundError(
+                    f"Stage 3 需要上游产物 stage2_refined.json，但未在 {run_dir} 找到。"
+                    f"请先以相同超参运行 stage2（或加入 --stages stage2,stage3）。"
+                )
+            with tracker.stage_timer("stage3_global_polish"):
+                stage3_path = run_stage3(cfg, stage2_path, run_dir, client, tracker, video_tag=video_tag)
+            result["artifacts"]["stage3_polished"] = stage3_path
 
         this_run["status"] = "completed"
         result["status"] = "completed"
