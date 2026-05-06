@@ -47,12 +47,79 @@ def resolve_run_dir(cfg: PipelineConfig, video_path: str, output_root: str) -> s
     )
 
 
+def _resolve_previous_stage_dir(
+    video_base_dir: str,
+    current_run_dir: str,
+    filename: str,
+    hyper_sig_override: str = "",
+) -> str:
+    # 1) 显式指定 → 直接定位
+    if hyper_sig_override:
+        target_dir = os.path.join(video_base_dir, hyper_sig_override)
+        target_path = os.path.join(target_dir, filename)
+        if not os.path.exists(target_path):
+            raise FileNotFoundError(
+                f"通过 --hyper-sig={hyper_sig_override} 在 {target_dir} 下未找到 {filename}"
+            )
+        return target_dir
+
+    # 2) 先试当前 run_dir
+    if os.path.exists(os.path.join(current_run_dir, filename)):
+        return current_run_dir
+
+    # 3) 扫描 video_base_dir 下所有子目录
+    if not os.path.isdir(video_base_dir):
+        raise FileNotFoundError(
+            f"视频输出目录不存在: {video_base_dir}\n"
+            f"请先运行前一阶段，或通过 --hyper-sig 指定目录。"
+        )
+
+    candidates = []
+    try:
+        for entry in os.scandir(video_base_dir):
+            if entry.is_dir():
+                candidate = os.path.join(entry.path, filename)
+                if os.path.exists(candidate):
+                    candidates.append(entry.path)
+    except OSError:
+        pass
+
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        dirs = sorted(os.path.basename(d) for d in candidates)
+        raise FileNotFoundError(
+            f"在 {video_base_dir} 下找到多个包含 {filename} 的目录，"
+            f"请通过 --hyper-sig 指定:\n  " + "\n  ".join(dirs)
+        )
+
+    raise FileNotFoundError(
+        f"在 {video_base_dir} 下未找到 {filename}。"
+        f"请先运行前一阶段，或通过 --hyper-sig 指定目录。"
+    )
+
+
 def process_single_video(cfg: PipelineConfig, video_path: str, output_root: str) -> dict:
     if not os.path.isfile(video_path):
         raise FileNotFoundError(f"视频文件不存在: {video_path}")
 
     video_tag = sanitize_filename(os.path.splitext(os.path.basename(video_path))[0])
     run_dir = resolve_run_dir(cfg, video_path, output_root)
+
+    # stage2-only / stage3-only 时定位前序阶段产物所在目录
+    if cfg.stage2_only or cfg.stage3_only:
+        filename = "stage2_refined.json" if cfg.stage3_only else "pass3_final.json"
+        video_base_dir = os.path.join(output_root, video_tag)
+        previous_dir = _resolve_previous_stage_dir(
+            video_base_dir, run_dir, filename, cfg.hyper_sig_override,
+        )
+        if previous_dir != run_dir:
+            print(
+                f"🔍 [{video_tag}] 前序阶段产物位于: {previous_dir}\n"
+                f"   当前 hyper_sig: {hyper_signature(cfg)}"
+            )
+            run_dir = previous_dir
+
     os.makedirs(run_dir, exist_ok=True)
 
     meta_path = os.path.join(run_dir, "run_meta.json")

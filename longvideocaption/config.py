@@ -61,6 +61,7 @@ class PipelineConfig:
     stage1_only: bool = False
     stage2_only: bool = False
     stage3_only: bool = False
+    hyper_sig_override: str = ""  # stage2-only/stage3-only 时显式指定前序阶段目录签名
 
     strict_failure: bool = True
     video_extensions: List[str] = field(

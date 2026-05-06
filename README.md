@@ -58,6 +58,13 @@ flowchart TB
 > - `--stage1-only`：仅运行 Stage 1（Pass1 + Pass2 + Pass3），生成 `pass3_final.json` 后停止。
 > - `--stage2-only`：跳过 Stage 1，仅运行 Stage 2（帧精修），需 `pass3_final.json` 已存在。
 > - `--stage3-only`：跳过 Stage 1 和 Stage 2，仅运行 Stage 3（全局润色），需 `stage2_refined.json` 已存在。
+>
+> stage2-only / stage3-only 时，系统会按以下优先级自动定位前序阶段产物目录：
+> 1. `--hyper-sig` 显式指定目录名
+> 2. 当前 `hyper_signature` 对应的 `run_dir` 下是否存在
+> 3. 扫描 `{output}/{video_basename}/` 下所有子目录
+>
+> 这意味着分阶段运行时可以切换模型和超参，系统会自动找到前序阶段的输出。多个候选匹配时会提示用 `--hyper-sig` 消除歧义。
 
 ---
 
@@ -339,7 +346,9 @@ python main.py \
   --stage3-only
 ```
 
-> **关键约束**：分阶段运行时 `--input` 与 `--output` 必须保持不变，`resolve_run_dir` 才能正确找到前序阶段的产物文件。如果某视频缺失前置产物，会直接报错而非静默跳过。
+> **跨阶段目录查找**：Stage 2/3 启动时会自动扫描 `{output}/{video_basename}/` 下所有 `hyper_sig` 子目录来定位前序阶段产物。因此可以切换模型和超参，系统不会因 `hyper_signature` 变化而找不到文件。如果同一视频有多个符合条件的前序目录，请用 `--hyper-sig` 显式指定。
+>
+> **约束**：`--output` 必须与前一阶段保持一致。如果某视频缺失前置产物，会直接报错而非静默跳过。
 
 ### VSCode 调试
 
@@ -364,6 +373,7 @@ python main.py \
 | `--stage1-only`   | 只运行 Stage 1（Pass1 + Pass2 + Pass3），生成 `pass3_final.json` 后停止 | `False`                      |
 | `--stage2-only`   | 跳过 Stage 1，仅运行 Stage 2（帧精修），需 `pass3_final.json` 已存在 | `False`                      |
 | `--stage3-only`   | 跳过 Stage 1 和 Stage 2，仅运行 Stage 3（全局润色），需 `stage2_refined.json` 已存在 | `False`                      |
+| `--hyper-sig`     | stage2-only / stage3-only 时显式指定前序阶段的 `hyper_signature` 目录名（消除歧义） | 空（自动扫描）               |
 | `--api-key`       | OpenAI 兼容 API key                      | 空（必须传或改 config.py）   |
 | `--base-url`      | API base URL                             | 空（必须传或改 config.py）   |
 | `--model`         | 模型名                                   | `gemini-3.1-pro-preview`     |
@@ -379,6 +389,8 @@ python main.py \
 三个 stage flag 互斥，只能同时使用其中一个。不带任何 stage flag = 完整运行所有阶段。
 
 `--input` 与 `--video-root + --video-jsonl` 二选一，同时提供时 JSONL 模式优先。
+
+`--hyper-sig` 仅在 `--stage2-only` 或 `--stage3-only` 时生效。不提供时系统自动扫描前序目录。
 
 进阶超参（Stage 2/3 的 fps、max_frames、temperature、max_tokens 等）在 `longvideocaption/config.py` 的 `PipelineConfig` 里改默认值。Stage 2 并行相关参数包括 `stage2_parallel_max_workers`（非 qwen 最大并行请求数，默认 `4`）、`stage2_qwen_parallel_max_workers`（qwen 线程池安全上限，默认 `32`）和 `stage2_qwen_parallel_visual_token_budget`（qwen 同时在飞请求的视觉 token 预算，默认 `128 * 1024`）。
 

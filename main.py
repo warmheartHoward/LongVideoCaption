@@ -35,6 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="跳过 Stage 1 和 Stage 2，仅运行 Stage 3（全局润色），需 stage2_refined.json 已存在",
     )
 
+    p.add_argument("--hyper-sig", default=None, help="stage2-only/stage3-only 时显式指定前序阶段的 hyper_signature 目录名")
+
     p.add_argument("--model", default=None, help="覆盖 model_name")
     p.add_argument("--api-key", default=None, help="覆盖 api_key")
     p.add_argument("--base-url", default=None, help="覆盖 base_url")
@@ -77,6 +79,8 @@ def main(argv=None) -> int:
     cfg.stage1_only = bool(args.stage1_only)
     cfg.stage2_only = bool(args.stage2_only)
     cfg.stage3_only = bool(args.stage3_only)
+    if args.hyper_sig is not None:
+        cfg.hyper_sig_override = args.hyper_sig
 
     if args.model is not None:
         cfg.model_name = args.model
